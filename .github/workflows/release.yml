@@ -1,0 +1,68 @@
+name: Release MSI
+
+on:
+  push:
+    tags:
+      - '*.*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build MSI
+        run: npm run tauri build
+
+      - name: Rename MSI + SHA256
+        id: msi
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'
+          $msi = Get-ChildItem -Path 'src-tauri\target\release\bundle\msi' -Filter '*.msi' | Select-Object -First 1
+          if (-not $msi) { throw 'MSI not found' }
+          $suffix = $msi.Name.Substring($msi.Name.IndexOf('_', $msi.Name.IndexOf('_') + 1))
+          $newName = "owltools_${version}${suffix}"
+          $newPath = Join-Path $msi.DirectoryName $newName
+          Copy-Item $msi.FullName $newPath -Force
+          $hash = (Get-FileHash $newPath -Algorithm SHA256).Hash.ToLower()
+          "file_name=$newName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "file_path=$newPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ steps.msi.outputs.file_path }}
+
+      - name: Update manifest.json
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/update-manifest.mjs "${{ github.ref_name }}" "${{ steps.msi.outputs.sha256 }}" "${{ steps.msi.outputs.file_name }}"
+
+      - name: Commit and push manifest
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "Update manifest for ${{ github.ref_name }}"
+          git push origin HEAD:main

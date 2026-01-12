@@ -20,26 +20,35 @@
     versions: ManifestVersion[];
   };
 
-  let manifestUrl = '';
+  let manifestUrl = 'https://raw.githubusercontent.com/FordenHillson/OwlTools-Tauri/main/manifest.json';
   let manifest: Manifest | null = null;
   let errorText = '';
   let loading = false;
 
   let downloadStatus: { version: string; percent?: number; bytes?: number; total?: number; message?: string } | null = null;
   let installStatus: { message: string } | null = null;
+  let busyVersion: string | null = null;
+
+  $: latestVersion = (manifest?.latest || '').trim();
+  $: latestItem = manifest?.versions?.find(v => v.version === latestVersion) || null;
+  $: olderItems = (manifest?.versions || []).filter(v => v.version !== latestVersion);
 
   async function loadManifest() {
     errorText = '';
     installStatus = null;
     downloadStatus = null;
     manifest = null;
-    const url = manifestUrl.trim();
+    const baseUrl = manifestUrl.trim();
+    const url = baseUrl ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}ts=${Date.now()}` : '';
     if (!url) {
       errorText = 'Please enter manifest URL';
       return;
     }
     loading = true;
     try {
+      try {
+        localStorage.setItem('updaterManifestUrl', baseUrl);
+      } catch {}
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as Manifest;
@@ -57,6 +66,7 @@
     installStatus = null;
     downloadStatus = { version: v.version, message: 'Starting...' };
     try {
+      busyVersion = v.version;
       const out = await invoke<{ local_path: string }>('updater_download_msi', {
         version: v.version,
         url: v.msi.url,
@@ -66,6 +76,8 @@
     } catch (e: any) {
       errorText = String(e?.message || e || 'Download failed');
       downloadStatus = null;
+    } finally {
+      busyVersion = null;
     }
   }
 
@@ -74,11 +86,35 @@
     installStatus = { message: 'Launching installer...' };
     downloadStatus = null;
     try {
+      busyVersion = v.version;
       await invoke('updater_install_msi', { version: v.version });
       installStatus = { message: 'Installer launched. OwlTools will close.' };
     } catch (e: any) {
       errorText = String(e?.message || e || 'Install failed');
       installStatus = null;
+    } finally {
+      busyVersion = null;
+    }
+  }
+
+  async function downloadAndInstall(v: ManifestVersion) {
+    errorText = '';
+    installStatus = null;
+    downloadStatus = { version: v.version, message: 'Starting...' };
+    try {
+      busyVersion = v.version;
+      await invoke<{ local_path: string }>('updater_download_msi', {
+        version: v.version,
+        url: v.msi.url,
+        sha256: v.msi.sha256
+      });
+      installStatus = { message: 'Launching installer...' };
+      await invoke('updater_install_msi', { version: v.version });
+      installStatus = { message: 'Installer launched. OwlTools will close.' };
+    } catch (e: any) {
+      errorText = String(e?.message || e || 'Update failed');
+    } finally {
+      busyVersion = null;
     }
   }
 
@@ -86,6 +122,13 @@
   let unlistenInfo: (() => void) | null = null;
 
   onMount(async () => {
+    try {
+      const saved = localStorage.getItem('updaterManifestUrl');
+      if (saved && typeof saved === 'string') {
+        manifestUrl = saved;
+      }
+    } catch {}
+
     unlistenProgress = await listen<any>('updater://download_progress', (ev) => {
       const p = ev.payload as any;
       if (!p || !p.version) return;
@@ -102,6 +145,8 @@
       if (!p || !p.message) return;
       installStatus = { message: String(p.message) };
     });
+
+    loadManifest().catch(() => {});
   });
 
   onDestroy(() => {
@@ -149,22 +194,55 @@
       <div><strong>Latest:</strong> {manifest.latest || 'Unknown'}</div>
     </div>
 
-    <div class="list" aria-label="Versions">
-      {#each manifest.versions as v (v.version)}
+    {#if latestItem}
+      <div class="section-title">Latest</div>
+      <div class="list" aria-label="Latest">
         <div class="item">
           <div class="left">
-            <div class="ver">{v.version}</div>
-            {#if v.notes}
-              <div class="notes">{v.notes}</div>
+            <div class="ver">{latestItem.version}</div>
+            {#if latestItem.notes}
+              <div class="notes">{latestItem.notes}</div>
             {/if}
           </div>
           <div class="right">
-            <button class="btn" type="button" on:click={() => downloadMsi(v)}>Download</button>
-            <button class="btn primary" type="button" on:click={() => installMsi(v)}>Install</button>
+            <button
+              class="btn primary"
+              type="button"
+              disabled={busyVersion === latestItem.version}
+              on:click={() => downloadAndInstall(latestItem)}
+            >
+              {busyVersion === latestItem.version ? 'Working...' : 'Download & Install'}
+            </button>
           </div>
         </div>
-      {/each}
-    </div>
+      </div>
+    {/if}
+
+    {#if olderItems.length}
+      <div class="section-title">Older versions</div>
+      <div class="list" aria-label="Older versions">
+        {#each olderItems as v (v.version)}
+          <div class="item">
+            <div class="left">
+              <div class="ver">{v.version}</div>
+              {#if v.notes}
+                <div class="notes">{v.notes}</div>
+              {/if}
+            </div>
+            <div class="right">
+              <button
+                class="btn primary"
+                type="button"
+                disabled={busyVersion === v.version}
+                on:click={() => downloadAndInstall(v)}
+              >
+                {busyVersion === v.version ? 'Working...' : 'Download & Install'}
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -236,6 +314,12 @@
     display: flex;
     gap: 18px;
     flex-wrap: wrap;
+    opacity: 0.9;
+  }
+
+  .section-title {
+    margin-top: 6px;
+    font-weight: 600;
     opacity: 0.9;
   }
 

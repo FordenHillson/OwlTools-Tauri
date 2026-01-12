@@ -1,7 +1,15 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   const dispatch = createEventDispatcher();
   function openModule(key: string) {
+    if (key === 'updater') {
+      try {
+        if (latestAvailable) {
+          localStorage.setItem('updaterLastSeenLatest', latestAvailable);
+        }
+      } catch {}
+      updaterHasNew = false;
+    }
     dispatch('open-module', { key });
   }
 
@@ -18,6 +26,32 @@
   const minorStr = (import.meta as any).env?.VITE_BUILD_MINOR as string | undefined;
   const minor = Number.parseInt(minorStr || '0', 10);
   versionStamp = formatStamp(new Date(), Number.isFinite(minor) ? minor : 0);
+
+  let latestAvailable = '';
+  let updaterHasNew = false;
+
+  onMount(async () => {
+    try {
+      const manifestUrl = 'https://raw.githubusercontent.com/FordenHillson/OwlTools-Tauri/main/manifest.json';
+      const url = `${manifestUrl}?ts=${Date.now()}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;
+      const j = (await res.json()) as any;
+      const latest = (j && typeof j.latest === 'string') ? j.latest.trim() : '';
+      if (!latest) return;
+      latestAvailable = latest;
+      let lastSeen = '';
+      try {
+        lastSeen = (localStorage.getItem('updaterLastSeenLatest') || '').trim();
+      } catch {}
+      updaterHasNew = lastSeen !== '' && lastSeen !== latest;
+      if (lastSeen === '') {
+        // First run: treat current latest as seen to avoid flashing NEW
+        try { localStorage.setItem('updaterLastSeenLatest', latest); } catch {}
+        updaterHasNew = false;
+      }
+    } catch {}
+  });
 
   const shortcuts: Array<{ key: string; label: string; glyph?: string; iconSrc?: string }> = [
     { key: 'fulldst', label: 'Full DST View', iconSrc: '/FullDST.svg' },
@@ -39,6 +73,9 @@
             <img class="icon-img" src={s.iconSrc} alt="" loading="lazy" />
           {:else}
             {s.glyph}
+          {/if}
+          {#if s.key === 'updater' && updaterHasNew}
+            <span class="badge" aria-label="New update">NEW</span>
           {/if}
         </span>
         <span class="label">{s.label}</span>
@@ -108,6 +145,7 @@
     width: 56px;
     height: 56px;
     border-radius: 999px;
+    position: relative;
     display: grid;
     place-items: center;
     font-size: 20px;
@@ -125,6 +163,21 @@
     object-fit: contain;
     border-radius: 999px;
     display: block;
+  }
+
+  .badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    background: #e53935;
+    color: #fff;
+    border: 2px solid rgba(17, 17, 17, 0.25);
+    border-radius: 999px;
+    font-size: 10px;
+    line-height: 1;
+    padding: 4px 6px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
   }
 
   .label {
