@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "OwlTools",
+        "title": "OwlTools for Enfusion Engine",
         "width": 1200,
         "height": 800,
         "dragDropEnabled": true

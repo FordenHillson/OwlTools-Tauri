@@ -1041,6 +1041,8 @@ async fn ensure_cloudflared_binary(app: Option<&tauri::AppHandle>) -> Result<Pat
 async fn start_quick_tunnel_unique() -> Result<TunnelInfo, String> {
     let cloudflared = ensure_cloudflared_binary(None).await?;
     let mut cmd = TokioCommand::new(cloudflared);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
     cmd.arg("tunnel").arg("--no-autoupdate").arg("--loglevel").arg("info")
         .arg("--url").arg("http://127.0.0.1:8787")
         .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1139,6 +1141,8 @@ async fn start_quick_tunnel(state: tauri::State<'_, RemoteState>) -> Result<Stri
 
     let cloudflared = ensure_cloudflared_binary(Some(&state.app)).await?;
     let mut cmd = TokioCommand::new(cloudflared);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
     cmd.arg("tunnel").arg("--no-autoupdate").arg("--loglevel").arg("info")
         .arg("--url").arg("http://127.0.0.1:8787")
         .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -2479,6 +2483,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let version = app.package_info().version.to_string();
+                let _ = window.set_title(&format!("OwlTools for Enfusion Engine - {}", version));
+            }
             // start remote control server
             let app_handle = app.handle();
             let (tx, _rx) = broadcast::channel(32);
