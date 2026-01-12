@@ -154,7 +154,7 @@
     background: #f1f3f4;
     box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
     user-select: none;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .icon-img {
@@ -173,6 +173,7 @@
     color: #fff;
     border: 2px solid rgba(17, 17, 17, 0.25);
     border-radius: 999px;
+    z-index: 2;
     font-size: 10px;
     line-height: 1;
     padding: 4px 6px;
