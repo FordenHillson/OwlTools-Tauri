@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+    <link rel="stylesheet" href="%sveltekit.assets%/vendor/chrome-tabs.css" />
+    <link rel="stylesheet" href="%sveltekit.assets%/vendor/chrome-tabs-dark-theme.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tauri + SvelteKit + Typescript App</title>
+    %sveltekit.head%
+    <style>
+      html, body { height: 98%; }
+      body.theme-dark { background: #202124; color: #f1f3f4; }
+      body.theme-light { background: #ffffff; color: #111111; }
+      body.theme-dark button { background: #333; color: #fff; border: 1px solid #444; }
+      body.theme-dark button:hover { background: #3a3a3a; }
+      body.theme-light button { background: #fff; color: #111; border: 1px solid #dadce0; }
+      body.theme-light button:hover { background: #f6f6f6; }
+    </style>
+  </head>
+  <body class="theme-dark" data-sveltekit-preload-data="hover">
+    <script src="%sveltekit.assets%/vendor/draggabilly.pkgd.min.js"></script>
+    <script src="%sveltekit.assets%/vendor/chrome-tabs.js"></script>
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>
