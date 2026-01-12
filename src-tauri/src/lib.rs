@@ -946,9 +946,101 @@ fn greet(name: &str) -> String {
 #[derive(Serialize, Clone)]
 struct TunnelInfo { url: String, pid: u32 }
 
+const CLOUDFLARED_URL: &str = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+
+async fn is_pe_exe(path: &Path) -> bool {
+    if let Ok(bytes) = tokio::fs::read(path).await {
+        return bytes.len() >= 2 && bytes[0] == b'M' && bytes[1] == b'Z';
+    }
+    false
+}
+
+async fn ensure_cloudflared_binary(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
+    let bin_dir = ensure_data_dir().join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin dir: {}", e))?;
+    let exe_path = bin_dir.join("cloudflared.exe");
+
+    if exe_path.is_file() {
+        if let Ok(meta) = fs::metadata(&exe_path) {
+            if meta.len() > 0 && is_pe_exe(&exe_path).await {
+                return Ok(exe_path);
+            }
+        }
+        let _ = tokio::fs::remove_file(&exe_path).await;
+    }
+
+    if let Some(app) = app {
+        let _ = app.emit("updater://info", json!({ "message": "Downloading cloudflared..." }));
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("OwlTools-Cloudflared")
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let resp = client
+        .get(CLOUDFLARED_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Cloudflared download request failed: {}", e))?;
+    let final_url = resp.url().to_string();
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Cloudflared download failed: HTTP {} url={}", status, final_url));
+    }
+
+    if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+        if let Ok(cts) = ct.to_str() {
+            let cts_l = cts.to_lowercase();
+            if cts_l.contains("text/html") {
+                return Err(format!(
+                    "Cloudflared download returned unexpected content-type: {} url={} status={}",
+                    cts, final_url, status
+                ));
+            }
+        }
+    }
+
+    let tmp_path = bin_dir.join("cloudflared.download");
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| format!("Failed to create cloudflared file: {}", e))?;
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Cloudflared download stream error: {}", e))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Cloudflared write failed: {}", e))?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+    }
+    file.flush().await.map_err(|e| format!("Cloudflared flush failed: {}", e))?;
+
+    // Basic validation: ensure Windows PE header.
+    if !is_pe_exe(&tmp_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err("Cloudflared download did not look like a Windows executable".into());
+    }
+
+    // Move into place
+    let _ = tokio::fs::remove_file(&exe_path).await;
+    tokio::fs::rename(&tmp_path, &exe_path)
+        .await
+        .map_err(|e| format!("Failed to finalize cloudflared: {}", e))?;
+
+    if downloaded == 0 {
+        let _ = tokio::fs::remove_file(&exe_path).await;
+        return Err("Cloudflared download produced empty file".into());
+    }
+
+    Ok(exe_path)
+}
+
 #[tauri::command]
 async fn start_quick_tunnel_unique() -> Result<TunnelInfo, String> {
-    let mut cmd = TokioCommand::new("cloudflared");
+    let cloudflared = ensure_cloudflared_binary(None).await?;
+    let mut cmd = TokioCommand::new(cloudflared);
     cmd.arg("tunnel").arg("--no-autoupdate").arg("--loglevel").arg("info")
         .arg("--url").arg("http://127.0.0.1:8787")
         .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1045,7 +1137,8 @@ async fn start_quick_tunnel(state: tauri::State<'_, RemoteState>) -> Result<Stri
         }
     }
 
-    let mut cmd = TokioCommand::new("cloudflared");
+    let cloudflared = ensure_cloudflared_binary(Some(&state.app)).await?;
+    let mut cmd = TokioCommand::new(cloudflared);
     cmd.arg("tunnel").arg("--no-autoupdate").arg("--loglevel").arg("info")
         .arg("--url").arg("http://127.0.0.1:8787")
         .stdout(Stdio::piped()).stderr(Stdio::piped());
