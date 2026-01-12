@@ -17,6 +17,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -27,7 +33,7 @@ jobs:
         run: npm ci
 
       - name: Build MSI
-        run: npm run tauri build
+        run: npm run tauri build -- --bundles msi
 
       - name: Rename MSI + SHA256
         id: msi
