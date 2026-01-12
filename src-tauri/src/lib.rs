@@ -1176,10 +1176,28 @@ async fn updater_download_msi(app: tauri::AppHandle, version: String, url: Strin
         },
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("OwlTools-Updater")
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
     let resp = client.get(&url).send().await.map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Download failed: HTTP {}", resp.status()));
+    let final_url = resp.url().to_string();
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Download failed: HTTP {} url={}", status, final_url));
+    }
+
+    if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+        if let Ok(cts) = ct.to_str() {
+            let cts_l = cts.to_lowercase();
+            if cts_l.contains("text/html") || cts_l.contains("text/plain") {
+                let _ = app.emit(
+                    "updater://info",
+                    json!({ "message": format!("Updater download got unexpected content-type. status={} content-type={} url={}", status, cts, final_url) }),
+                );
+                return Err(format!("Download returned unexpected content-type: {} url={} status={}", cts, final_url, status));
+            }
+        }
     }
     let total = resp.content_length();
 
