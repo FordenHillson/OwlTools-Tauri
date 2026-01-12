@@ -1366,19 +1366,39 @@ async fn updater_install_msi(app: tauri::AppHandle, version: String) -> Result<(
         json!({ "message": "Launching MSI installer..." }),
     );
 
-    // Launch interactive installer UI (per-user). Do not use /qn.
-    // NOTE: For per-user MSI packages, these properties are commonly used.
     let msi_s = msi_path.to_string_lossy().to_string();
-    let mut cmd = TokioCommand::new("msiexec");
-    cmd.arg("/i")
-        .arg(msi_s)
-        .arg("ALLUSERS=2")
-        .arg("MSIINSTALLPERUSER=1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    cmd.spawn().map_err(|e| format!("Failed to launch msiexec: {}", e))?;
+    #[cfg(windows)]
+    {
+        // Updating an MSI installed under Program Files typically requires elevation.
+        // Use UAC prompt (RunAs). Do not use /qn.
+        let msi_ps = msi_s.replace('"', "\"\"").replace('`', "``");
+        let cmdline = format!(
+            "Start-Process msiexec -Verb RunAs -ArgumentList @('/i','{}')",
+            msi_ps
+        );
+        let mut cmd = TokioCommand::new("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(cmdline)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.spawn()
+            .map_err(|e| format!("Failed to launch elevated installer: {}", e))?;
+    }
+    #[cfg(not(windows))]
+    {
+        // Fallback: just run msiexec directly where applicable.
+        let mut cmd = TokioCommand::new("msiexec");
+        cmd.arg("/i")
+            .arg(msi_s)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.spawn().map_err(|e| format!("Failed to launch msiexec: {}", e))?;
+    }
 
     // Close the app so the installer can replace files.
     app.exit(0);
