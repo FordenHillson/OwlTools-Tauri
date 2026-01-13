@@ -55,10 +55,14 @@
 
   const shortcuts: Array<{ key: string; label: string; glyph?: string; iconSrc?: string }> = [
     { key: 'fulldst', label: 'Full DST View', iconSrc: '/FullDST.svg' },
-    { key: 'socket', label: 'Socket Manager', iconSrc: '/Socket_Manager.svg' },
-    { key: 'updater', label: 'Updater', glyph: '⬆' },
-    { key: 'settings', label: 'Settings', glyph: '⚙' }
+    { key: 'socket', label: 'Socket Manager', iconSrc: '/Socket_Manager.svg' }
   ];
+
+  const updaterShortcut: { key: string; label: string; glyph?: string; iconSrc?: string } = {
+    key: 'updater',
+    label: 'Updater',
+    glyph: '⬆'
+  };
 </script>
 
 <div class="welcome">
@@ -81,6 +85,22 @@
         <span class="label">{s.label}</span>
       </button>
     {/each}
+  </div>
+
+  <div class="actions actions-updater" aria-label="Updater">
+    <button class="shortcut" type="button" on:click={() => openModule(updaterShortcut.key)} aria-label={updaterShortcut.label}>
+      <span class="icon" aria-hidden="true">
+        {#if updaterShortcut.iconSrc}
+          <img class="icon-img" src={updaterShortcut.iconSrc} alt="" loading="lazy" />
+        {:else}
+          {updaterShortcut.glyph}
+        {/if}
+        {#if updaterHasNew}
+          <span class="badge" aria-label="New update">NEW</span>
+        {/if}
+      </span>
+      <span class="label">{updaterShortcut.label}</span>
+    </button>
   </div>
 
   {#if versionStamp}
@@ -113,6 +133,12 @@
     gap: 18px;
     width: min(680px, calc(100% - 24px));
     padding: 8px 0;
+  }
+
+  .actions-updater {
+    width: min(240px, calc(100% - 24px));
+    grid-template-columns: 1fr;
+    padding-top: 0;
   }
   .logo { width: 30vh; height: auto; }
 

@@ -9,6 +9,8 @@
   let tabs: any;
   let addBtn: HTMLButtonElement;
   let themeBtn: HTMLButtonElement;
+  let dragRaf = 0;
+  let classObserver: MutationObserver | null = null;
   let tabModels: Array<{ id: string; type: string; title: string }> = [];
   let activeTabId: string | null = null;
   let activeModel: { id: string; type: string; title: string } | null = null;
@@ -27,6 +29,27 @@
     }
     tabs = new ChromeTabs();
     tabs.init(container);
+
+    const startDragLoop = () => {
+      if (dragRaf) return;
+      const tick = () => {
+        if (!container || !container.classList.contains('chrome-tabs-is-sorting')) {
+          dragRaf = 0;
+          return;
+        }
+        updateAddButtonPosition();
+        dragRaf = requestAnimationFrame(tick);
+      };
+      dragRaf = requestAnimationFrame(tick);
+    };
+
+    classObserver = new MutationObserver(() => {
+      if (container.classList.contains('chrome-tabs-is-sorting')) {
+        startDragLoop();
+      }
+    });
+    classObserver.observe(container, { attributes: true, attributeFilter: ['class'] });
+
     const onActive = (e: any) => {
       const el = e.detail?.tabEl as HTMLElement | null;
       if (!el) return;
@@ -58,6 +81,13 @@
     container.addEventListener('tabReorder', scheduleUpdate as EventListener);
 
     scheduleUpdate();
+
+    return () => {
+      if (dragRaf) cancelAnimationFrame(dragRaf);
+      dragRaf = 0;
+      if (classObserver) classObserver.disconnect();
+      classObserver = null;
+    };
   });
 
   function addNewTab() {
@@ -94,7 +124,7 @@
 
   function updateAddButtonPosition() {
     if (!container || !addBtn) return;
-    const lastTab = container.querySelector('.chrome-tabs-content .chrome-tab:last-child') as HTMLElement | null;
+    const lastTab = container.querySelector('.chrome-tabs-content .chrome-tab:last-child:not(.chrome-tab-is-dragging)') as HTMLElement | null;
     const content = container.querySelector('.chrome-tabs-content') as HTMLElement | null;
     if (!lastTab || !content) return;
 
@@ -108,8 +138,12 @@
     const themeWidth = Math.ceil(themeRect.width || 0);
     const reserve = btnWidth + themeWidth + margin * 3;
     container.style.setProperty('--newtab-space', `${reserve}px`);
-    if (tabs && typeof tabs.layoutTabs === 'function') {
-      tabs.layoutTabs();
+
+    // Avoid forcing layout during drag-sort; the library is already managing tab transforms.
+    if (!container.classList.contains('chrome-tabs-is-sorting')) {
+      if (tabs && typeof tabs.layoutTabs === 'function') {
+        tabs.layoutTabs();
+      }
     }
     const desiredLeft = (tabRect.left - containerRect.left) + lastTab.offsetWidth + margin;
 
@@ -174,6 +208,10 @@
     line-height: 1;
     cursor: pointer;
     z-index: 20;
+  }
+
+  :global(.chrome-tabs.chrome-tabs-is-sorting) .add-tab {
+    pointer-events: none;
   }
   .add-tab:hover { background: #dadce0; }
   .add-tab:active { background: #c8c9cc; }
