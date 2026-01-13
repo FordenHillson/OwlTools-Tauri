@@ -103,6 +103,10 @@
     position: relative;
     padding-bottom: 20px;
   }
+
+  :global(body.theme-light) .welcome {
+    color: #111;
+  }
   .actions {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -191,6 +195,10 @@
     white-space: nowrap;
   }
 
+  :global(body.theme-light) .welcome .label {
+    color: rgba(17, 17, 17, 0.92);
+  }
+
   .version {
     position: absolute;
     bottom: 4px;
@@ -200,5 +208,9 @@
     line-height: 14px;
     color: rgba(255, 255, 255, 0.65);
     user-select: none;
+  }
+
+  :global(body.theme-light) .welcome .version {
+    color: rgba(17, 17, 17, 0.65);
   }
 </style>
