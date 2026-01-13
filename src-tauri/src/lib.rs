@@ -2505,7 +2505,8 @@ pub fn run() {
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let version = app.package_info().version.to_string();
-                let _ = window.set_title(&format!("OwlTools for Enfusion Engine - {}", version));
+                let display_version = version.split_once('+').map(|(_, b)| b).unwrap_or(version.as_str());
+                let _ = window.set_title(&format!("OwlTools for Enfusion Engine - {}", display_version));
             }
             // start remote control server
             let app_handle = app.handle();
