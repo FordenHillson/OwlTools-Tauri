@@ -36,6 +36,8 @@ jobs:
         run: node scripts/set-tauri-version.mjs "${{ github.ref_name }}"
 
       - name: Build MSI
+        env:
+          OWLTOOLS_BUILD_TAG: ${{ github.ref_name }}
         run: npm run tauri build -- --bundles msi
 
       - name: Rename MSI + SHA256
