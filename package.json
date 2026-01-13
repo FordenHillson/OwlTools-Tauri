@@ -10,7 +10,9 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "release:tag": "node scripts/tag-and-push.mjs"
+    "release:tag": "node scripts/tag-and-push.mjs",
+    "release:set-version": "node scripts/set-tauri-version.mjs",
+    "release:build": "npm run tauri build"
   },
   "license": "MIT",
   "dependencies": {
