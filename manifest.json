@@ -1,8 +1,16 @@
 {
   "product": "OwlTools",
   "platform": "windows-x64",
-  "latest": "12.01.2026.08",
+  "latest": "13.01.2026.01",
   "versions": [
+    {
+      "version": "13.01.2026.01",
+      "notes": "Release 13.01.2026.01",
+      "msi": {
+        "url": "https://github.com/FordenHillson/OwlTools-Tauri/releases/download/13.01.2026.01/owltools_13.01.2026.01_x64_en-US.msi",
+        "sha256": "0b3a7f81b008279e27f010b7ce727ae3d2b286b958d09e84a9047d232a1d1d13"
+      }
+    },
     {
       "version": "12.01.2026.08",
       "notes": "Release 12.01.2026.08",
