@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   const dispatch = createEventDispatcher();
   function openModule(key: string) {
@@ -16,10 +16,69 @@
 
   let versionStamp = '';
 
+  type Heart = {
+    id: string;
+    left: number;
+    size: number;
+    durationMs: number;
+    driftPx: number;
+    risePx: number;
+    rotDeg: number;
+  };
+
+  let hearts: Heart[] = [];
+  let heartInterval: number | null = null;
+  const heartTimeouts = new Set<number>();
+  let welcomeEl: HTMLDivElement;
+  let resizeObserver: ResizeObserver | null = null;
+  let welcomeW = 0;
+  let welcomeH = 0;
+
+  function clamp(n: number, min: number, max: number) {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function spawnHeart() {
+    const id = `h-${Math.random().toString(36).slice(2, 9)}-${Date.now()}`;
+    const left = Math.random() * 100;
+    const baseSize = 12 + Math.floor(Math.random() * 18);
+    const sizeBoost = welcomeW > 0 ? clamp(Math.round(welcomeW / 120), 0, 10) : 0;
+    const size = baseSize + sizeBoost;
+    const risePx = welcomeH > 0 ? clamp(Math.round(welcomeH * 0.55), 180, 520) : 240;
+    const durationMs = welcomeH > 0
+      ? clamp(1800 + Math.floor(welcomeH * 2.2) + Math.floor(Math.random() * 900), 2200, 5200)
+      : (2400 + Math.floor(Math.random() * 1800));
+    const driftRange = welcomeW > 0 ? clamp(Math.round(welcomeW * 0.12), 24, 160) : 48;
+    const driftPx = -Math.floor(driftRange / 2) + Math.floor(Math.random() * driftRange);
+    const rotDeg = -25 + Math.floor(Math.random() * 50);
+    const heart: Heart = { id, left, size, durationMs, driftPx, risePx, rotDeg };
+    hearts = [...hearts, heart].slice(-40);
+    const t = window.setTimeout(() => {
+      hearts = hearts.filter((h) => h.id !== id);
+      heartTimeouts.delete(t);
+    }, durationMs + 150);
+    heartTimeouts.add(t);
+  }
+
   let latestAvailable = '';
   let updaterHasNew = false;
 
   onMount(async () => {
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        const r = entry?.contentRect;
+        if (!r) return;
+        welcomeW = r.width;
+        welcomeH = r.height;
+      });
+      if (welcomeEl) resizeObserver.observe(welcomeEl);
+    }
+
+    heartInterval = window.setInterval(() => {
+      if (Math.random() < 0.85) spawnHeart();
+    }, 380);
+
     try {
       const v = await invoke<string>('get_display_version');
       if (typeof v === 'string' && v.trim()) {
@@ -48,6 +107,19 @@
     } catch {}
   });
 
+  onDestroy(() => {
+    if (heartInterval != null) {
+      window.clearInterval(heartInterval);
+      heartInterval = null;
+    }
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
+    }
+    for (const t of heartTimeouts) window.clearTimeout(t);
+    heartTimeouts.clear();
+  });
+
   const shortcuts: Array<{ key: string; label: string; glyph?: string; iconSrc?: string }> = [
     { key: 'fulldst', label: 'Full DST View', iconSrc: '/FullDST.svg' },
     { key: 'socket', label: 'Socket Manager', iconSrc: '/Socket_Manager.svg' }
@@ -60,7 +132,15 @@
   };
 </script>
 
-<div class="welcome">
+<div class="welcome" bind:this={welcomeEl}>
+  <div class="hearts" aria-hidden="true">
+    {#each hearts as h (h.id)}
+      <span
+        class="heart"
+        style={`--x:${h.left}%;--size:${h.size}px;--dur:${h.durationMs}ms;--drift:${h.driftPx}px;--rise:${h.risePx}px;--rot:${h.rotDeg}deg;`}
+      >❤️</span>
+    {/each}
+  </div>
   <img class="logo" src="/owl_Valen.png" alt="Owl" />
   <h1>Owl Tools</h1>  
   <p>Tool for Enfusion Engine</p>
@@ -113,10 +193,52 @@
     justify-content: center;
     text-align: center;
     width: 100%;
-    min-height: 60vh;
+    height: 88vh;
+    min-height: 100%;
+    flex: 1;
     gap: 12px;
     position: relative;
     padding-bottom: 20px;
+  }
+
+  .hearts {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .welcome > :global(*):not(.hearts) {
+    position: relative;
+    z-index: 1;
+  }
+
+  .heart {
+    position: absolute;
+    left: var(--x);
+    bottom: -18px;
+    font-size: var(--size);
+    line-height: 1;
+    transform: translate3d(0, 0, 0) rotate(var(--rot));
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
+    opacity: 0;
+    animation: floatHeart var(--dur) linear forwards;
+    will-change: transform, opacity;
+  }
+
+  @keyframes floatHeart {
+    0% {
+      opacity: 0;
+      transform: translate3d(0, 0, 0) rotate(var(--rot));
+    }
+    10% {
+      opacity: 0.95;
+    }
+    100% {
+      opacity: 0;
+      transform: translate3d(var(--drift), calc(var(--rise) * -1), 0) rotate(calc(var(--rot) + 18deg));
+    }
   }
 
   :global(body.theme-light) .welcome {

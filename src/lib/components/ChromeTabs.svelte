@@ -244,9 +244,9 @@
   .chrome-tabs-dark-theme .add-tab:hover { background: #555; }
   .chrome-tabs-dark-theme .add-tab:active { background: #333; }
 
-  .tab-shell { display: flex; flex-direction: column;}
-  .tab-panes { position: relative; flex: 1 1 auto; min-height: 0; }
-  .tab-pane { flex: 1; align-items: stretch; justify-content: flex-start; padding: 24px; }
-  .tab-pane.center { align-items: center; justify-content: center; }
+  .tab-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .tab-panes { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+  .tab-pane { flex: 1 1 auto; min-height: 0; width: 100%; align-items: stretch; justify-content: flex-start; padding: 24px; }
+  .tab-pane.center { align-items: center; justify-content: center; padding: 0; }
   .placeholder { opacity: 0.8; }
 </style>
