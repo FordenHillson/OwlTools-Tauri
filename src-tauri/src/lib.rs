@@ -38,6 +38,13 @@ struct ScanLogPayload {
     total: Option<usize>,
 }
 
+#[tauri::command]
+fn get_display_version(app: tauri::AppHandle) -> String {
+    let version = app.package_info().version.to_string();
+    let display_version = option_env!("OWLTOOLS_BUILD_TAG").unwrap_or(version.as_str());
+    display_version.to_string()
+}
+
 fn gen_hex16() -> String {
     static CTR: AtomicU64 = AtomicU64::new(1);
     let now = std::time::SystemTime::now()
@@ -2588,6 +2595,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_display_version,
             greet,
             read_text_file,
             write_text_file,

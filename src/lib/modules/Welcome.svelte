@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   const dispatch = createEventDispatcher();
   function openModule(key: string) {
     if (key === 'updater') {
@@ -15,22 +16,16 @@
 
   let versionStamp = '';
 
-  function pad2(n: number) {
-    return String(n).padStart(2, '0');
-  }
-
-  function formatStamp(date: Date, minor: number) {
-    return `${pad2(date.getDate())}.${pad2(date.getMonth() + 1)}.${date.getFullYear()}.${pad2(minor)}`;
-  }
-
-  const minorStr = (import.meta as any).env?.VITE_BUILD_MINOR as string | undefined;
-  const minor = Number.parseInt(minorStr || '0', 10);
-  versionStamp = formatStamp(new Date(), Number.isFinite(minor) ? minor : 0);
-
   let latestAvailable = '';
   let updaterHasNew = false;
 
   onMount(async () => {
+    try {
+      const v = await invoke<string>('get_display_version');
+      if (typeof v === 'string' && v.trim()) {
+        versionStamp = v.trim();
+      }
+    } catch {}
     try {
       const manifestUrl = 'https://raw.githubusercontent.com/FordenHillson/OwlTools-Tauri/main/manifest.json';
       const url = `${manifestUrl}?ts=${Date.now()}`;
