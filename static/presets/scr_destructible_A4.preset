@@ -1,0 +1,48 @@
+ID: scr_destructible_Arma 4
+TITLE: SCR Destructible Arma 4
+Project: Arma 4
+GENERATOR: template
+DESCRIPTION: Example preset using static DestructibleEntity with MeshObject and phases. Uses base object from selection.
+
+--- TEMPLATE ---
+SCR_DestructibleEntity {
+ ID "{{ENTITY_ID}}"
+ components {
+  MeshObject "{{MESH_ID_BRACED}}" {
+   {{BASE_OBJECT_LINE}}
+  }
+  RigidBody "{{ID1}}" {
+   ModelGeometry 1
+   Static 1
+  }
+ }
+ coords 1391.61 38.009 2915.614
+ MaxHealth 20
+ FirstDestructionPhase SCR_DestructionPhase "{{ID2}}" {
+  PhaseDestroyEffects {
+   SCR_DebrisEffect "{{ID3}}" {
+    m_ModelPrefabs {
+     {{FIRST_PHASE_DEBRIS}}
+    }
+   }
+  }
+ }
+ DamagePhases {
+  SCR_DestructionPhase "{{ID4}}" {
+   Threshold 0.5
+   Model {{FIRST_PHASE_MODEL}}
+   PhaseDestroyEffects {
+    SCR_DebrisEffect "{{ID5}}" {
+     m_ModelPrefabs {
+      {{LAST_PHASE_DEBRIS}}
+     }
+    }
+   }
+  }
+ }
+ LastDestructionPhase SCR_DestructionPhase "{{ID6}}" {
+  Model {{LAST_PHASE_MODEL}}
+ }
+ DestroyAtNoHealth 0
+}
+--- END TEMPLATE ---

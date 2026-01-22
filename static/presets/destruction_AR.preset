@@ -1,0 +1,34 @@
+ID: destruction_Arma Reforger
+TITLE: Destruction Arma Reforger
+Project: Arma Reforger
+GENERATOR: template
+DESCRIPTION: Builds GenericEntity with SCR_DestructionMultiPhaseComponent using scanned dst/dbr phases.
+
+--- TEMPLATE ---
+GenericEntity {
+ ID "{{ENTITY_ID}}"
+ components {
+  MeshObject "{{MESH_ID_BRACED}}" {
+   {{BASE_OBJECT_LINE}}
+  }
+  RigidBody "{{ID1}}" {
+   ModelGeometry 1
+   Static 1
+  }
+  SCR_DestructionMultiPhaseComponent "{{ID2}}" {
+   "Additional hit zones" {
+    SCR_HitZone Hitzone {
+     HZDefault 1
+    }
+   }
+   m_bDeleteAfterFinalPhase 0
+   m_aDamagePhases {
+    {{PHASES_TEXT}}
+   }
+  }
+  RplComponent "{{ID3}}" {
+  }
+ }
+ coords 1349.548 39 2245.082
+}
+--- END TEMPLATE ---

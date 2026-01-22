@@ -29,9 +29,282 @@ use std::time::UNIX_EPOCH;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeSet;
 use sha2::{Digest, Sha256};
+use rand::Rng;
+use regex::Regex;
 
 #[derive(Serialize, Clone)]
 struct ScanLogPayload {
+    level: String,
+    message: String,
+    current: Option<usize>,
+    total: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct MetaEntry { guid: String, path: String }
+
+#[tauri::command]
+async fn prefabdst_read_meta(xob_path: String) -> Result<MetaEntry, String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    match read_xob_object_field_from_meta(&xob_abs) {
+        Ok((g, p)) => Ok(MetaEntry { guid: g, path: p }),
+        Err(_) => Ok(MetaEntry { guid: String::new(), path: xob_path }),
+    }
+}
+
+fn extract_template_body(all_text: &str) -> String {
+    // Prefer content between '--- TEMPLATE ---' and '--- END TEMPLATE ---' (case-insensitive)
+    let nl = detect_newline(all_text);
+    let mut start: Option<usize> = None;
+    let mut end: Option<usize> = None;
+    let mut offset = 0usize;
+    for ln in all_text.lines() {
+        let low = ln.trim().to_lowercase();
+        if start.is_none() && low.contains("--- template ---") {
+            start = Some(offset + ln.len() + nl.len());
+        } else if start.is_some() && low.contains("--- end template ---") {
+            end = Some(offset);
+            break;
+        }
+        offset += ln.len() + nl.len();
+    }
+    if let (Some(s), Some(e)) = (start, end) {
+        return all_text[s..e].to_string();
+    }
+    // Fallback: strip header only
+    strip_preset_header(all_text)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ScrDebrisItem { guid: String, path: String }
+#[derive(Serialize, Deserialize, Clone)]
+struct ScrPhaseItem { pid: String, model_guid: String, model_path: String, debris: Vec<ScrDebrisItem> }
+#[derive(Serialize, Deserialize, Clone)]
+struct ScrDstScanResult { base_guid: String, base_path: String, phases: Vec<ScrPhaseItem> }
+
+#[tauri::command]
+async fn prefabdst_scan_dst(xob_path: String) -> Result<ScrDstScanResult, String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    if !xob_abs.is_file() { return Err("Invalid xob path".into()); }
+    let (base_guid, base_path) = read_xob_object_field_from_meta(&xob_abs)?;
+    let (phases_vec, debris_map) = scan_dst_for_phases_debris(&xob_abs);
+    let mut phases: Vec<ScrPhaseItem> = Vec::new();
+    for (pid, (g, p)) in phases_vec {
+        let debris_items: Vec<ScrDebrisItem> = debris_map
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(dg, dp)| ScrDebrisItem { guid: dg, path: dp })
+            .collect();
+        phases.push(ScrPhaseItem { pid, model_guid: g, model_path: p, debris: debris_items });
+    }
+    Ok(ScrDstScanResult { base_guid, base_path, phases })
+}
+
+#[derive(Default)]
+struct PresetHeader {
+    id: String,
+    title: String,
+    project: String,
+    generator: String,
+    description: String,
+}
+
+fn parse_preset_header(all_text: &str) -> PresetHeader {
+    let mut h = PresetHeader::default();
+    for ln in all_text.lines() {
+        let line = ln.trim();
+        if line.is_empty() { break; }
+        if let Some(col) = line.find(':') {
+            let k = line[..col].trim().to_lowercase();
+            let v = line[col+1..].trim();
+            match k.as_str() {
+                "id" => h.id = v.to_string(),
+                "title" => h.title = v.to_string(),
+                "project" => h.project = v.to_string(),
+                "generator" => h.generator = v.to_string(),
+                "description" => h.description = v.to_string(),
+                _ => {}
+            }
+        }
+    }
+    h
+}
+
+fn find_dst_directory(xob_abs: &Path) -> Option<PathBuf> {
+    let parent = xob_abs.parent()?;
+    let mut exact = parent.join("dst");
+    if exact.is_dir() { return Some(exact); }
+    // case-insensitive search among siblings
+    if let Ok(rd) = fs::read_dir(parent) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if name.eq_ignore_ascii_case("dst") {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn scan_dst_for_phases_debris(base_xob_abs: &Path) -> (Vec<(String, (String, String))>, std::collections::HashMap<String, Vec<(String, String)>>) {
+    let mut phases: Vec<(String, (String, String))> = Vec::new();
+    let mut debris: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+    let Some(dst_dir) = find_dst_directory(base_xob_abs) else { return (phases, debris); };
+
+    let stem = base_xob_abs.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let base_cf = stem;
+    let rx_phase = Regex::new(&format!(r"(?i){}{}_dst_(?P<p>\d+)\.xob$", regex::escape(""), regex::escape(&base_cf))).unwrap();
+    let rx_debris = Regex::new(&format!(r"(?i){}{}_dst_(?P<p>\d+)_dbr_(?P<d>\d+)\.xob$", regex::escape(""), regex::escape(&base_cf))).unwrap();
+
+    if let Ok(rd) = fs::read_dir(&dst_dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if !p.is_file() { continue; }
+            let name = match p.file_name().and_then(|s| s.to_str()) { Some(s)=>s, None=>continue };
+            if let Some(c) = rx_phase.captures(name) {
+                let pid_raw = c.name("p").map(|m| m.as_str()).unwrap_or("");
+                let pid = format!("{:0>2}", pid_raw);
+                match read_xob_object_field_from_meta(&p) {
+                    Ok((g, r)) => phases.push((pid, (g, r))),
+                    Err(_) => phases.push((pid, (String::new(), String::new()))),
+                }
+                continue;
+            }
+            if let Some(c) = rx_debris.captures(name) {
+                let pid_raw = c.name("p").map(|m| m.as_str()).unwrap_or("");
+                let pid = format!("{:0>2}", pid_raw);
+                match read_xob_object_field_from_meta(&p) {
+                    Ok((g, r)) => debris.entry(pid).or_default().push((g, r)),
+                    Err(_) => debris.entry(pid).or_default().push((String::new(), String::new())),
+                }
+            }
+        }
+    }
+    // Ensure every PID that has debris also has a phase entry (even if empty)
+    {
+        use std::collections::HashSet;
+        let have: HashSet<String> = phases.iter().map(|(p, _)| p.clone()).collect();
+        for pid in debris.keys() {
+            if !have.contains(pid) {
+                phases.push((pid.clone(), (String::new(), String::new())));
+            }
+        }
+    }
+    // sort phases by pid numeric
+    phases.sort_by_key(|(pid, _)| pid.parse::<i32>().unwrap_or(9999));
+    // sort debris by trailing _dbr_YY number inferred from path, fallback by name
+    for (_pid, arr) in debris.iter_mut() {
+        arr.sort_by_key(|(_g, path)| {
+            let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let re = Regex::new(r"(?i)_dbr_(\d+)\.xob$").unwrap();
+            if let Some(c) = re.captures(name) { c[1].parse::<i32>().unwrap_or(9999) } else { 9999 }
+        });
+    }
+    (phases, debris)
+}
+
+fn render_scr_destructible_template(
+    preset_text: &str,
+    base_guid: &str,
+    base_res: &str,
+    base_xob_abs: &Path,
+    override_data: Option<&ScrDstScanResult>,
+) -> String {
+    let nl = detect_newline(preset_text);
+    let mut body = extract_template_body(preset_text);
+
+    // Generate IDs
+    let entity_id = gen_guid16();
+    let mesh_id = gen_guid16();
+    let id1 = gen_guid16();
+    let id2 = gen_guid16();
+    let id3 = gen_guid16();
+    let id4 = gen_guid16();
+    let id5 = gen_guid16();
+    let id6 = gen_guid16();
+
+    // Base object line (prefer override base if provided)
+    let (use_guid, use_res) = if let Some(ov) = override_data {
+        if !ov.base_guid.is_empty() || !ov.base_path.is_empty() {
+            (ov.base_guid.clone(), ov.base_path.clone())
+        } else { (base_guid.to_string(), base_res.to_string()) }
+    } else {
+        (base_guid.to_string(), base_res.to_string())
+    };
+    let base_object_line = if !use_guid.is_empty() && !use_res.is_empty() {
+        format!("   Object \"{{{}}}{}\"", use_guid, use_res)
+    } else if !base_guid.is_empty() && !base_res.is_empty() {
+        format!("   Object \"{{{}}}{}\"", base_guid, base_res)
+    } else {
+        "   Object \"\"".to_string()
+    };
+
+    // Scan dst for phases and debris, unless override provided from UI
+    let (phases, debris_map) = if let Some(ov) = override_data {
+        let mut phases: Vec<(String, (String, String))> = Vec::new();
+        let mut debris: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        for ph in &ov.phases {
+            phases.push((ph.pid.clone(), (ph.model_guid.clone(), ph.model_path.clone())));
+            let mut arr: Vec<(String, String)> = Vec::new();
+            for d in &ph.debris { arr.push((d.guid.clone(), d.path.clone())); }
+            debris.insert(ph.pid.clone(), arr);
+        }
+        (phases, debris)
+    } else {
+        scan_dst_for_phases_debris(base_xob_abs)
+    };
+    let first_phase = phases.first().map(|(_pid,(g,r))| (g.clone(), r.clone()));
+    let last_phase = phases.last().map(|(_pid,(g,r))| (g.clone(), r.clone()));
+    let first_pid = phases.first().map(|(pid, _)| pid.clone());
+    let last_pid = phases.last().map(|(pid, _)| pid.clone());
+
+    let first_phase_model = first_phase.map(|(g,r)| format!("\"{{{}}}{}\"", g, r)).unwrap_or_else(|| "\"\"".to_string());
+    let last_phase_model = last_phase.map(|(g,r)| format!("\"{{{}}}{}\"", g, r)).unwrap_or_else(|| "\"\"".to_string());
+
+    let join_debris = |pid_opt: Option<String>| -> String {
+        if let Some(pid) = pid_opt {
+            if let Some(arr) = debris_map.get(&pid) {
+                let parts: Vec<String> = arr.iter().map(|(g,r)| format!("\"{{{}}}{}\"", g, r)).collect();
+                return parts.join(" ");
+            }
+        }
+        String::new()
+    };
+    let first_phase_debris = join_debris(first_pid);
+    let last_phase_debris = join_debris(last_pid);
+
+    // Replace placeholders
+    let replaces = [
+        ("{{ENTITY_ID}}", &entity_id),
+        ("{{MESH_ID_BRACED}}", &format!("{{{}}}", mesh_id)),
+        ("{{ID1}}", &id1),
+        ("{{ID2}}", &id2),
+        ("{{ID3}}", &id3),
+        ("{{ID4}}", &id4),
+        ("{{ID5}}", &id5),
+        ("{{ID6}}", &id6),
+        ("{{BASE_OBJECT_LINE}}", &base_object_line),
+        ("{{FIRST_PHASE_MODEL}}", &first_phase_model),
+        ("{{LAST_PHASE_MODEL}}", &last_phase_model),
+        ("{{FIRST_PHASE_DEBRIS}}", &first_phase_debris),
+        ("{{LAST_PHASE_DEBRIS}}", &last_phase_debris),
+    ];
+    for (k, v) in replaces {
+        body = body.replace(k, v);
+    }
+    // Ensure newline style remains consistent
+    if nl == "\r\n" { body = body.replace("\n", "\r\n"); }
+    body
+}
+
+#[derive(Serialize, Clone)]
+struct PrefabDstLogPayload {
     level: String,
     message: String,
     current: Option<usize>,
@@ -53,6 +326,12 @@ fn gen_hex16() -> String {
         .unwrap_or(0);
     let c = CTR.fetch_add(1, Ordering::Relaxed);
     format!("{:016X}", now ^ (c.wrapping_mul(0x9E3779B97F4A7C15)))
+}
+
+fn gen_guid16() -> String {
+    // Match Python behavior: random 64-bit -> 16 hex
+    let v: u64 = rand::thread_rng().gen();
+    format!("{:016X}", v)
 }
 
 fn build_et_meta_text(name_value: &str) -> String {
@@ -135,8 +414,7 @@ fn read_xob_object_field_from_meta(xob_abs: &Path) -> Result<(String, String), S
     } else {
         name_value.clone()
     };
-    let obj_field = format!("{{{}}}{}", guid, rel_assets);
-    Ok((obj_field, guid))
+    Ok((guid, rel_assets))
 }
 
 fn parse_txo_socket_names(txo_text: &str) -> Vec<String> {
@@ -691,7 +969,8 @@ async fn create_new_et_from_xob(
 
     emit_scan_log(&app, "info", format!("Processing xob: {}", xob_abs.to_string_lossy()), None, None);
 
-    let (obj_field, _guid) = read_xob_object_field_from_meta(&xob_abs)?;
+    let (obj_guid, obj_path) = read_xob_object_field_from_meta(&xob_abs)?;
+    let obj_field = format!("{{{}}}{}", obj_guid, obj_path);
     emit_scan_log(&app, "info", "Loaded .xob.meta Name/GUID", None, None);
 
     let txo_abs = xob_abs.with_extension("txo");
@@ -944,6 +1223,338 @@ fn emit_scan_log(app: &tauri::AppHandle, level: &str, message: impl Into<String>
         total,
     };
     let _ = app.emit("prefab_scan_log", payload);
+}
+
+fn emit_prefabdst_log(app: &tauri::AppHandle, level: &str, message: impl Into<String>, current: Option<usize>, total: Option<usize>) {
+    let payload = PrefabDstLogPayload {
+        level: level.to_string(),
+        message: message.into(),
+        current,
+        total,
+    };
+    let _ = app.emit("prefabdst_log", payload);
+}
+
+fn detect_newline(s: &str) -> &'static str {
+    if s.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
+fn strip_preset_header(body: &str) -> String {
+    // Remove leading "KEY: value" lines until first blank line.
+    let nl = detect_newline(body);
+    let mut out: Vec<&str> = Vec::new();
+    let mut skipping = true;
+    let re_kv = Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_\-]*\s*:\s*.*$").unwrap();
+    for ln in body.lines() {
+        if skipping {
+            if ln.trim().is_empty() {
+                skipping = false;
+                continue;
+            }
+            if re_kv.is_match(ln) {
+                continue;
+            }
+            // Unexpected line: treat as start of body
+            skipping = false;
+        }
+        out.push(ln);
+    }
+    out.join(nl)
+}
+
+fn replace_object_marker(text: &str, guid: &str, res: &str) -> String {
+    // Replace annotated marker line like: Object "{guid from xob input}path from xob input"
+    let rep = format!("Object \"{{{}}}{}\"", guid, res);
+    let re = Regex::new(r#"Object\s+"[^"\n]*guid\s+from\s+xob\s+input[^"\n]*""#).unwrap();
+    re.replace_all(text, rep).to_string()
+}
+
+fn replace_v2_model_marker(text: &str, guid: &str, res: &str) -> String {
+    let rep = format!("Model \"{{{}}}{}\"", guid, res);
+    let re = Regex::new(r#"Model\s+"[^"\n]*same\s+name_v2_dst[^"\n]*""#).unwrap();
+    re.replace_all(text, rep).to_string()
+}
+
+fn replace_gen_guid_markers(text: &str) -> String {
+    let re_braced = Regex::new(r"\{\s*gen\s+guid\s*\}").unwrap();
+    let re_quoted = Regex::new(r#""\s*gen\s+guid\s*""#).unwrap();
+    let s = re_braced
+        .replace_all(text, |_caps: &regex::Captures| format!("{{{}}}", gen_guid16()))
+        .to_string();
+    re_quoted
+        .replace_all(&s, |_caps: &regex::Captures| format!("\"{}\"", gen_guid16()))
+        .to_string()
+}
+
+fn find_fractalparts_bounds(text: &str) -> Option<(usize, usize, usize)> {
+    // Returns (open_brace_idx, close_brace_idx, keyword_idx)
+    let kw = text.find("FractalParts")?;
+    let open = text[kw..].find('{').map(|i| kw + i)?;
+    let mut depth: i32 = 0;
+    let mut i = open;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] as char {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, i, kw));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_fractalpart_blocks(inner: &str) -> (Vec<(char, String)>, Vec<String>) {
+    // Parse by lines with brace counting, matching the Python approach.
+    let lines: Vec<&str> = inner.lines().collect();
+    let mut blocks: Vec<(char, String)> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let ln = lines[i];
+        if ln.trim_start().starts_with("FractalPartData") {
+            let mut depth: i32 = 0;
+            let mut j = i;
+            let mut started = false;
+            while j < lines.len() {
+                let l2 = lines[j];
+                if l2.contains('{') {
+                    started = true;
+                    depth += l2.matches('{').count() as i32;
+                }
+                if l2.contains('}') {
+                    depth -= l2.matches('}').count() as i32;
+                }
+                j += 1;
+                if started && depth <= 0 {
+                    break;
+                }
+            }
+            let nl = detect_newline(inner);
+            let blk = lines[i..j].join(nl);
+            let letter = Regex::new(r##"\bPartId\s+\"([A-Z])\""##)
+                .unwrap()
+                .captures(&blk)
+                .and_then(|c| c.get(1))
+                .and_then(|m| m.as_str().chars().next())
+                .unwrap_or('A');
+            blocks.push((letter, blk));
+            i = j;
+        } else {
+            others.push(ln.to_string());
+            i += 1;
+        }
+    }
+    blocks.sort_by_key(|(c, _)| *c as u32);
+    (blocks, others)
+}
+
+fn clone_fractalpart_block(block: &str, src_letter: char, new_letter: char) -> String {
+    let mut out = block.to_string();
+    let re_partid = Regex::new(&format!(r##"\bPartId\s+\"{}\""##, regex::escape(&src_letter.to_string()))).unwrap();
+    out = re_partid.replace_all(&out, format!("PartId \"{}\"", new_letter)).to_string();
+
+    let re_q_letter = Regex::new(&format!(r##"\"{}\""##, regex::escape(&src_letter.to_string()))).unwrap();
+    out = re_q_letter.replace_all(&out, format!("\"{}\"", new_letter)).to_string();
+
+    let re_q_letter_num = Regex::new(&format!(r##"\"{}(\d+)\""##, regex::escape(&src_letter.to_string()))).unwrap();
+    out = re_q_letter_num
+        .replace_all(&out, |caps: &regex::Captures| format!("\"{}{}\"", new_letter, &caps[1]))
+        .to_string();
+
+    let re_guid = Regex::new(r##"\"\{[0-9A-Fa-f]{16}\}\""##).unwrap();
+    out = re_guid
+        .replace_all(&out, |_caps: &regex::Captures| format!("\"{{{}}}\"", gen_guid16()))
+        .to_string();
+    out
+}
+
+fn ensure_fractalparts_zone_count(text: &str, desired_count: usize) -> String {
+    let desired = desired_count.clamp(1, 26);
+    let nl = detect_newline(text);
+    let Some((open, close, _kw)) = find_fractalparts_bounds(text) else {
+        return text.to_string();
+    };
+    let inner = &text[(open + 1)..close];
+    let (blocks, other_lines) = extract_fractalpart_blocks(inner);
+
+    let mut existing: HashMap<char, String> = HashMap::new();
+    for (c, b) in blocks.iter() {
+        existing.insert(*c, b.clone());
+    }
+
+    let mut template_letter: Option<char> = None;
+    let mut template_block: Option<String> = None;
+    for (c, b) in blocks.iter().rev() {
+        if Regex::new(r##"\bPartId\s+\"([A-Z])\""##).unwrap().is_match(b) {
+            template_letter = Some(*c);
+            template_block = Some(b.clone());
+            break;
+        }
+    }
+    if template_block.is_none() {
+        if let Some((c, b)) = blocks.last() {
+            template_letter = Some(*c);
+            template_block = Some(b.clone());
+        }
+    }
+
+    let mut kept: Vec<String> = Vec::new();
+    for i in 0..desired {
+        let lt = (b'A' + (i as u8)) as char;
+        if let Some(b) = existing.get(&lt) {
+            kept.push(b.clone());
+        } else if let (Some(tb), Some(tl)) = (template_block.as_ref(), template_letter) {
+            kept.push(clone_fractalpart_block(tb, tl, lt));
+        }
+    }
+
+    let mut inner_new_lines: Vec<String> = Vec::new();
+    for blk in kept {
+        inner_new_lines.extend(blk.lines().map(|s| s.to_string()));
+    }
+    if other_lines.iter().any(|s| !s.trim().is_empty()) {
+        inner_new_lines.extend(other_lines);
+    }
+    let new_inner = inner_new_lines.join(nl);
+    format!("{}{}{}{}{}", &text[..(open + 1)], nl, new_inner, nl, &text[close..])
+}
+
+fn apply_zone_hp(text: &str, hp: i32) -> String {
+    let nl = detect_newline(text);
+    let Some((open, close, _kw)) = find_fractalparts_bounds(text) else {
+        return text.to_string();
+    };
+    let inner = &text[(open + 1)..close];
+    let (blocks, other_lines) = extract_fractalpart_blocks(inner);
+    let re_hp = Regex::new(r"(?m)^(\s*MaxHealth)\s+[0-9]+(?:\.[0-9]+)?").unwrap();
+    let mut out_blocks: Vec<String> = Vec::new();
+    for (_c, b) in blocks {
+        out_blocks.push(re_hp.replace_all(&b, |caps: &regex::Captures| format!("{} {}", &caps[1], hp)).to_string());
+    }
+    let mut inner_new_lines: Vec<String> = Vec::new();
+    for blk in out_blocks {
+        inner_new_lines.extend(blk.lines().map(|s| s.to_string()));
+    }
+    if other_lines.iter().any(|s| !s.trim().is_empty()) {
+        inner_new_lines.extend(other_lines);
+    }
+    let new_inner = inner_new_lines.join(nl);
+    format!("{}{}{}{}{}", &text[..(open + 1)], nl, new_inner, nl, &text[close..])
+}
+
+fn build_zone_fractal_from_preset(
+    preset_text: &str,
+    base_guid: &str,
+    base_res: &str,
+    v2_guid: Option<&str>,
+    v2_res: Option<&str>,
+    zone_count: usize,
+    hp_zone: i32,
+) -> String {
+    let mut s = strip_preset_header(preset_text);
+    s = replace_object_marker(&s, base_guid, base_res);
+    if let (Some(g), Some(r)) = (v2_guid, v2_res) {
+        s = replace_v2_model_marker(&s, g, r);
+    }
+    s = replace_gen_guid_markers(&s);
+    s = ensure_fractalparts_zone_count(&s, zone_count);
+    s = apply_zone_hp(&s, hp_zone);
+    s
+}
+
+#[derive(Serialize)]
+struct PrefabDstBuildResult {
+    out_paths: Vec<String>,
+}
+
+#[tauri::command]
+async fn prefabdst_build(
+    app: tauri::AppHandle,
+    preset_file: String,
+    preset_text: String,
+    zones: usize,
+    hp_zone: i32,
+    model_files: Vec<String>,
+    save_folder: String,
+    scr_override: Option<ScrDstScanResult>,
+) -> Result<PrefabDstBuildResult, String> {
+    let zones = zones.clamp(1, 26);
+    let hp_zone = hp_zone.clamp(1, 9999);
+    if model_files.is_empty() {
+        return Err("No model files".into());
+    }
+    if save_folder.trim().is_empty() {
+        return Err("No save folder".into());
+    }
+    let out_dir = PathBuf::from(save_folder.trim());
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+    let total = model_files.len();
+    emit_prefabdst_log(&app, "info", format!("Preset: {}", preset_file), None, None);
+    emit_prefabdst_log(&app, "info", format!("Zones: {} (hp={})", zones, hp_zone), None, None);
+
+    let mut out_paths: Vec<String> = Vec::new();
+    for (idx, xob_path) in model_files.iter().enumerate() {
+        let cur = idx + 1;
+        emit_prefabdst_log(&app, "info", format!("Reading meta for: {}", xob_path), Some(cur), Some(total));
+        let xob_abs = PathBuf::from(xob_path);
+        let (base_guid, base_res) = read_xob_object_field_from_meta(&xob_abs)?;
+
+        // v2 model (.xob.meta) next to base file
+        let mut v2_guid: Option<String> = None;
+        let mut v2_res: Option<String> = None;
+        if let Some(stem) = xob_abs.file_stem().and_then(|s| s.to_str()) {
+            if let Some(parent) = xob_abs.parent() {
+                let v2 = parent.join(format!("{}_V2_dst.xob", stem));
+                if v2.is_file() {
+                    if let Ok((g2, r2)) = read_xob_object_field_from_meta(&v2) {
+                        v2_guid = Some(g2);
+                        v2_res = Some(r2);
+                    }
+                }
+            }
+        }
+
+        // Branch by preset generator
+        let hdr = parse_preset_header(&preset_text);
+        let gen_key = hdr.generator.trim().to_lowercase();
+        emit_prefabdst_log(&app, "info", format!("Generator: {}", if gen_key.is_empty() { "(unknown)" } else { &gen_key }), Some(cur), Some(total));
+
+        emit_prefabdst_log(&app, "info", "Generating ET text...", Some(cur), Some(total));
+        let et_text = if gen_key == "template" {
+            // scr_destructible template rendering (auto-scan dst)
+            render_scr_destructible_template(&preset_text, &base_guid, &base_res, &xob_abs, scr_override.as_ref())
+        } else {
+            // default to zone_fractal
+            build_zone_fractal_from_preset(
+                &preset_text,
+                &base_guid,
+                &base_res,
+                v2_guid.as_deref(),
+                v2_res.as_deref(),
+                zones,
+                hp_zone,
+            )
+        };
+
+        let stem = xob_abs
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| "Invalid xob file name".to_string())?;
+        let out_path = out_dir.join(format!("{}_test_dst_prefab.et", stem));
+        emit_prefabdst_log(&app, "info", format!("Writing: {}", out_path.to_string_lossy()), Some(cur), Some(total));
+        fs::write(&out_path, et_text).map_err(|e| e.to_string())?;
+        out_paths.push(out_path.to_string_lossy().to_string());
+    }
+
+    emit_prefabdst_log(&app, "info", format!("Done. Generated {} file(s).", out_paths.len()), None, None);
+    Ok(PrefabDstBuildResult { out_paths })
 }
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -2620,6 +3231,9 @@ pub fn run() {
             create_new_et_from_xob,
             suggest_prefab_folders_from_xob,
             create_new_et_with_meta_from_xob,
+            prefabdst_build,
+            prefabdst_scan_dst,
+            prefabdst_read_meta,
             
         ])
         .run(tauri::generate_context!())

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Welcome from '$lib/modules/Welcome.svelte';
   import FullDSTView from '$lib/modules/FullDSTView.svelte';
+  import PrefabDST from '$lib/modules/PrefabDST.svelte';
   import SocketManager from '$lib/modules/SocketManager.svelte';
   import Updater from '$lib/modules/Updater.svelte';
   import { theme, toggleTheme } from '$lib/stores/theme';
@@ -114,7 +115,7 @@
     if (!key) return;
     const current = activeModel;
     if (!current) return;
-    const title = key === 'fulldst' ? 'Full DST View' : key === 'socket' ? 'Socket Manager' : key === 'updater' ? 'Updater' : key;
+    const title = key === 'fulldst' ? 'Full DST View' : key === 'prefabdst' ? 'Build Prefab DST' : key === 'socket' ? 'Socket Manager' : key === 'updater' ? 'Updater' : key;
     const updated = tabModels.map(t => t.id === current.id ? { ...t, type: key, title } : t);
     tabModels = updated;
     if (tabs && tabs.activeTabEl) {
@@ -173,6 +174,8 @@
           <Welcome on:open-module={handleOpenModule} />
         {:else if t.type === 'fulldst'}
           <FullDSTView />
+        {:else if t.type === 'prefabdst'}
+          <PrefabDST />
         {:else if t.type === 'socket'}
           <SocketManager />
         {:else if t.type === 'updater'}

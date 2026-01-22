@@ -1,0 +1,67 @@
+FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_Fractal_Base.et" {
+ ID "E0BB06262CFC5978"
+ components {
+  MeshObject "{506EDA9D46FC6C06}" {
+   Object "{EB46E4CB6DEF3AFF}Assets/Structures/Military/Houses/Barracks_E_02/Barracks_E_02_V2_dst.xob"   
+  }
+  RigidBody "{506EDA9CBE1B57FF}" {
+   ModelGeometry 1
+   Static 1
+  }
+  WB_SlotBoneMappingsComponent "{61A49EE0539CF4E7}" {
+   SlotBoneMappings {
+   }
+  }
+ }
+ coords -16.236 -8.701 68.15
+ BaseStats DestructibleBaseStats "{6644C3D95FBFC931}" {
+  MaxHealth 10
+ }
+ LastDestructionPhase SCR_DestructionPhase "{B245BE70E33C1233}" {
+  Model "{guid from same name_v2_dst.xob.meta}path from same name_v2_dst.xob.meta"
+ }
+ FractalParts {
+
+  FractalPartData "{6598B97E1323840B}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+    MaxHealth 50
+   }
+  }
+  FractalPartData "{6598B97FEEC2642C}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+   PartId "B"
+   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+    MaxHealth 50
+   }
+   FirstDestructionPhase FractalPartDestructionPhase "{6598B97728DE19E7}" {
+    PhaseShowIds {
+     "B"
+    }
+   }
+   DamagePhases {
+    FractalPartDestructionPhase "{6598B97728DE19D6}" {
+     PhaseShowIds {
+      "B" "B1"
+     }
+    }
+   }
+  }
+  FractalPartData "{6598B97FEFA6DA79}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+   PartId "C"
+   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+    MaxHealth 50
+   }
+   FirstDestructionPhase FractalPartDestructionPhase "{6598B97728DE19E7}" {
+    PhaseShowIds {
+     "C"
+    }
+   }
+   DamagePhases {
+    FractalPartDestructionPhase "{6598B97728DE19D6}" {
+     PhaseShowIds {
+      "C" "C1"
+     }
+    }
+   }
+  }
+}
+}
