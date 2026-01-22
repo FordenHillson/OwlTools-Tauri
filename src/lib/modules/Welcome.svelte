@@ -16,54 +16,83 @@
 
   let versionStamp = '';
 
-  type Heart = {
+  type Env = {
     id: string;
     left: number;
     size: number;
     durationMs: number;
     driftPx: number;
-    risePx: number;
+    fallPx: number;
     rotDeg: number;
   };
 
-  let hearts: Heart[] = [];
-  let heartInterval: number | null = null;
-  const heartTimeouts = new Set<number>();
+  let envs: Env[] = [];
+  let envInterval: number | null = null;
+  const envTimeouts = new Set<number>();
   let welcomeEl: HTMLDivElement;
   let resizeObserver: ResizeObserver | null = null;
   let welcomeW = 0;
   let welcomeH = 0;
+  let logoSrc = '/icon/ChineseNewYear/owl_Chinese.png';
+  let logoAudio: HTMLAudioElement | null = null;
+  let logoAudioNeedsGesture = false;
+  function startLogoAudioOnGesture() {
+    if (!logoAudio) return;
+    logoAudio.play().catch(() => {});
+    window.removeEventListener('click', startLogoAudioOnGesture);
+    window.removeEventListener('keydown', startLogoAudioOnGesture);
+    logoAudioNeedsGesture = false;
+  }
 
   function clamp(n: number, min: number, max: number) {
     return Math.max(min, Math.min(max, n));
   }
 
-  function spawnHeart() {
-    const id = `h-${Math.random().toString(36).slice(2, 9)}-${Date.now()}`;
+  function spawnEnv() {
+    const id = `e-${Math.random().toString(36).slice(2, 9)}-${Date.now()}`;
     const left = Math.random() * 100;
-    const baseSize = 12 + Math.floor(Math.random() * 18);
-    const sizeBoost = welcomeW > 0 ? clamp(Math.round(welcomeW / 120), 0, 10) : 0;
+    const baseSize = 14 + Math.floor(Math.random() * 18);
+    const sizeBoost = welcomeW > 0 ? clamp(Math.round(welcomeW / 110), 0, 10) : 0;
     const size = baseSize + sizeBoost;
-    const risePx = welcomeH > 0 ? clamp(Math.round(welcomeH * 0.55), 180, 520) : 240;
+    const fallPx = welcomeH > 0 ? clamp(Math.round(welcomeH * 0.65), 220, 580) : 260;
     const durationMs = welcomeH > 0
-      ? clamp(1800 + Math.floor(welcomeH * 2.2) + Math.floor(Math.random() * 900), 2200, 5200)
-      : (2400 + Math.floor(Math.random() * 1800));
-    const driftRange = welcomeW > 0 ? clamp(Math.round(welcomeW * 0.12), 24, 160) : 48;
+      ? clamp(2000 + Math.floor(welcomeH * 2.0) + Math.floor(Math.random() * 900), 2400, 5600)
+      : (2600 + Math.floor(Math.random() * 1800));
+    const driftRange = welcomeW > 0 ? clamp(Math.round(welcomeW * 0.14), 28, 180) : 56;
     const driftPx = -Math.floor(driftRange / 2) + Math.floor(Math.random() * driftRange);
-    const rotDeg = -25 + Math.floor(Math.random() * 50);
-    const heart: Heart = { id, left, size, durationMs, driftPx, risePx, rotDeg };
-    hearts = [...hearts, heart].slice(-40);
+    const rotDeg = -18 + Math.floor(Math.random() * 36);
+    const env: Env = { id, left, size, durationMs, driftPx, fallPx, rotDeg };
+    envs = [...envs, env].slice(-40);
     const t = window.setTimeout(() => {
-      hearts = hearts.filter((h) => h.id !== id);
-      heartTimeouts.delete(t);
+      envs = envs.filter((h) => h.id !== id);
+      envTimeouts.delete(t);
     }, durationMs + 150);
-    heartTimeouts.add(t);
+    envTimeouts.add(t);
   }
 
   let latestAvailable = '';
   let updaterHasNew = false;
 
   onMount(async () => {
+    // Randomize Welcome logo: 10% dek_Im variant, 90% standard Chinese icon
+    logoSrc = Math.random() < 0.1
+      ? '/icon/ChineseNewYear/owl_Chinese_dek_Im.png'
+      : '/icon/ChineseNewYear/owl_Chinese.png';
+
+    if (logoSrc.endsWith('owl_Chinese_dek_Im.png')) {
+      try {
+        logoAudio = new Audio('/icon/ChineseNewYear/ching-chong_.mp3');
+        logoAudio.loop = true;
+        await logoAudio.play().catch(() => {
+          logoAudioNeedsGesture = true;
+        });
+        if (logoAudioNeedsGesture) {
+          window.addEventListener('click', startLogoAudioOnGesture);
+          window.addEventListener('keydown', startLogoAudioOnGesture);
+        }
+      } catch {}
+    }
+
     if (typeof ResizeObserver !== 'undefined') {
       resizeObserver = new ResizeObserver((entries) => {
         const entry = entries[0];
@@ -75,9 +104,9 @@
       if (welcomeEl) resizeObserver.observe(welcomeEl);
     }
 
-    heartInterval = window.setInterval(() => {
-      if (Math.random() < 0.85) spawnHeart();
-    }, 380);
+    envInterval = window.setInterval(() => {
+      if (Math.random() < 0.85) spawnEnv();
+    }, 420);
 
     try {
       const v = await invoke<string>('get_display_version');
@@ -108,16 +137,25 @@
   });
 
   onDestroy(() => {
-    if (heartInterval != null) {
-      window.clearInterval(heartInterval);
-      heartInterval = null;
+    if (envInterval != null) {
+      window.clearInterval(envInterval);
+      envInterval = null;
     }
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;
     }
-    for (const t of heartTimeouts) window.clearTimeout(t);
-    heartTimeouts.clear();
+    for (const t of envTimeouts) window.clearTimeout(t);
+    envTimeouts.clear();
+    if (logoAudio) {
+      try { logoAudio.pause(); } catch {}
+      logoAudio = null;
+    }
+    if (logoAudioNeedsGesture) {
+      window.removeEventListener('click', startLogoAudioOnGesture);
+      window.removeEventListener('keydown', startLogoAudioOnGesture);
+      logoAudioNeedsGesture = false;
+    }
   });
 
   const shortcuts: Array<{ key: string; label: string; glyph?: string; iconSrc?: string }> = [
@@ -134,15 +172,15 @@
 </script>
 
 <div class="welcome" bind:this={welcomeEl}>
-  <div class="hearts" aria-hidden="true">
-    {#each hearts as h (h.id)}
+  <div class="envs" aria-hidden="true">
+    {#each envs as e (e.id)}
       <span
-        class="heart"
-        style={`--x:${h.left}%;--size:${h.size}px;--dur:${h.durationMs}ms;--drift:${h.driftPx}px;--rise:${h.risePx}px;--rot:${h.rotDeg}deg;`}
-      >❤️</span>
+        class="env"
+        style={`--x:${e.left}%;--size:${e.size}px;--dur:${e.durationMs}ms;--drift:${e.driftPx}px;--fall:${e.fallPx}px;--rot:${e.rotDeg}deg;`}
+      >🧧</span>
     {/each}
   </div>
-  <img class="logo" src="/owl_Valen.png" alt="Owl" />
+  <img class="logo" src={logoSrc} alt="Owl" />
   <h1>Owl Tools</h1>  
   <p>Tool for Enfusion Engine</p>
   <div class="actions" aria-label="Modules">
@@ -202,7 +240,7 @@
     padding-bottom: 20px;
   }
 
-  .hearts {
+  .envs {
     position: absolute;
     inset: 0;
     overflow: hidden;
@@ -210,25 +248,25 @@
     z-index: 0;
   }
 
-  .welcome > :global(*):not(.hearts) {
+  .welcome > :global(*):not(.envs) {
     position: relative;
     z-index: 1;
   }
 
-  .heart {
+  .env {
     position: absolute;
     left: var(--x);
-    bottom: -18px;
+    top: -18px;
     font-size: var(--size);
     line-height: 1;
     transform: translate3d(0, 0, 0) rotate(var(--rot));
     filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
     opacity: 0;
-    animation: floatHeart var(--dur) linear forwards;
+    animation: fallEnv var(--dur) linear forwards;
     will-change: transform, opacity;
   }
 
-  @keyframes floatHeart {
+  @keyframes fallEnv {
     0% {
       opacity: 0;
       transform: translate3d(0, 0, 0) rotate(var(--rot));
@@ -238,7 +276,7 @@
     }
     100% {
       opacity: 0;
-      transform: translate3d(var(--drift), calc(var(--rise) * -1), 0) rotate(calc(var(--rot) + 18deg));
+      transform: translate3d(var(--drift), var(--fall), 0) rotate(calc(var(--rot) + 18deg));
     }
   }
 
