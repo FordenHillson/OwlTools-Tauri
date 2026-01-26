@@ -303,9 +303,17 @@
     e.preventDefault();
     e.stopPropagation();
     isDragOver = false;
-    // If Workbench provides text-based drag (no files), parse it
     const dt = e.dataTransfer;
-    if (dt) handleWorkbenchTextDrop(dt);
+    if (!dt) return;
+    // Try to get files from dataTransfer (fallback for when Tauri events don't fire)
+    if (dt.files && dt.files.length > 0) {
+      const first = dt.files[0];
+      const path = (first as any)?.path || first.name;
+      if (typeof path === 'string') applySelection(path);
+      return;
+    }
+    // Try text-based drag from Workbench
+    handleWorkbenchTextDrop(dt);
   }
   async function pickFile() {
     try {
@@ -852,24 +860,32 @@
     (async () => {
       try {
         // scope visual feedback to component area only; rely on DOM drag events for overlay
-        unlistenDrop = await listen<string[] | string>('tauri://file-drop', (e) => {
-          isDragOver = false;
-          const payload = e.payload as any;
-          const first = Array.isArray(payload) ? payload[0] : payload;
-          if (typeof first === 'string') applySelection(first);
-        });
-
-        const webview = getCurrentWebviewWindow();
-        unlistenWebview = await webview.onDragDropEvent((ev: any) => {
-          const t = ev?.payload?.type ?? ev?.type ?? ev?.event ?? ev?.kind;
-          if (t === 'drop') {
+        try {
+          unlistenDrop = await listen<string[] | string>('tauri://file-drop', (e) => {
             isDragOver = false;
-            const pathsAny = ev?.payload?.paths ?? ev?.paths ?? ev?.payload;
-            const first = Array.isArray(pathsAny) ? pathsAny[0] : pathsAny;
+            const payload = e.payload as any;
+            const first = Array.isArray(payload) ? payload[0] : payload;
             if (typeof first === 'string') applySelection(first);
-          }
-          // Ignore 'cancelled' / 'leave' here; rely on DOM dragleave with bounds check to hide overlay
-        });
+          });
+        } catch (err) {
+          console.warn('tauri://file-drop listener failed:', err);
+        }
+
+        try {
+          const webview = getCurrentWebviewWindow();
+          unlistenWebview = await webview.onDragDropEvent((ev: any) => {
+            const t = ev?.payload?.type ?? ev?.type ?? ev?.event ?? ev?.kind;
+            if (t === 'drop') {
+              isDragOver = false;
+              const pathsAny = ev?.payload?.paths ?? ev?.paths ?? ev?.payload;
+              const first = Array.isArray(pathsAny) ? pathsAny[0] : pathsAny;
+              if (typeof first === 'string') applySelection(first);
+            }
+            // Ignore 'cancelled' / 'leave' here; rely on DOM dragleave with bounds check to hide overlay
+          });
+        } catch (err) {
+          console.warn('webview.onDragDropEvent listener failed:', err);
+        }
         // Listen for remote toggle events from built-in remote server
         unlistenRemote = await listen('remote_toggle', (e: any) => {
           try {
@@ -971,7 +987,7 @@
     wndDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); chooseDropEffect(e); isDragOver = isInsideRoot(e); };
     wndDragEnter = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); chooseDropEffect(e); isDragOver = isInsideRoot(e); };
     wndDragLeave = (e: DragEvent) => { e.preventDefault(); if (!isInsideRoot(e)) isDragOver = false; };
-    wndDrop = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); isDragOver = false; const dt = (e as DragEvent).dataTransfer; if (dt) handleWorkbenchTextDrop(dt); };
+    wndDrop = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); isDragOver = false; };
     window.addEventListener('dragover', wndDragOver, { capture: true });
     window.addEventListener('dragenter', wndDragEnter, { capture: true });
     window.addEventListener('dragleave', wndDragLeave, { capture: true });
@@ -980,7 +996,7 @@
     docDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); chooseDropEffect(e); isDragOver = isInsideRoot(e); };
     docDragEnter = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); chooseDropEffect(e); isDragOver = isInsideRoot(e); };
     docDragLeave = (e: DragEvent) => { e.preventDefault(); if (!isInsideRoot(e)) isDragOver = false; };
-    docDrop = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); isDragOver = false; const dt = e.dataTransfer; if (dt) handleWorkbenchTextDrop(dt); };
+    docDrop = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); isDragOver = false; };
     document.addEventListener('dragover', docDragOver, { capture: true });
     document.addEventListener('dragenter', docDragEnter, { capture: true });
     document.addEventListener('dragleave', docDragLeave, { capture: true });
