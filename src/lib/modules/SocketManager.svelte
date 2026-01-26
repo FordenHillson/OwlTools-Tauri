@@ -6,7 +6,7 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   type LogEntry = { id: string; type: 'info' | 'warn' | 'error'; message: string };
   let fillExpanded = true;
-  let createExpanded = true;
+  let createExpanded = false;
   let logExpanded = true;
   let filterTerm = '';
   let logs: LogEntry[] = [];
@@ -2259,7 +2259,7 @@
     padding: 28px;
     margin-bottom: 16px;
     background: rgba(255, 255, 255, 0.03);
-    min-height: 120px;
+    min-height: 80px;
   }
   :global(body.theme-light) .step-panel {
     background: rgba(0, 0, 0, 0.03);
@@ -2269,13 +2269,13 @@
     border: 2px dashed rgba(255, 255, 255, 0.3);
     border-radius: 12px;
     padding: 40px;
-    text-align: center;
-    cursor: pointer;
     display: flex;
+    align-items: center;
+    justify-content: center;
     flex-direction: column;
     gap: 8px;
     width: 100%;
-    min-height: 220px;
+    min-height: 140px;
   }
   .drop-zone.drag-active {
     border-color: #3ecbff;
@@ -2650,7 +2650,7 @@
   }
   .custom-list {
     flex: 1;
-    min-height: 120px;
+    max-height: 120px;
     background: rgba(0, 0, 0, 0.3);
     border-radius: 8px;
     padding: 8px;

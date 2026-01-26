@@ -541,6 +541,7 @@
 
   function clearModelFiles() {
     modelFiles = [];
+    saveFolder = '';
     lastScrScanKey = '';
     scrBaseGuid = '';
     scrBasePath = '';

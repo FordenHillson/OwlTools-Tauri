@@ -35,6 +35,138 @@
   let isTunnelLoading = $state(false);
   let tunnelPid = $state<number | null>(null);
   let showQr = $state(false);
+  let showFilePopup = $state(false);
+  let checklistItems = $state([
+    { id: 1, label: 'Uncheck Merge Meshes', passed: false, checked: false, fixed: false },
+    { id: 2, label: 'Uncheck Merge Tri Meshes', passed: false, checked: false, fixed: false }
+  ]);
+  let isCheckingFile = $state(false);
+  let isFixingFile = $state(false);
+  let checkMessage = $state<string>('');
+  
+  async function checkFileContent(path: string) {
+    isCheckingFile = true;
+    checkMessage = '';
+    try {
+      const content = await invoke<string>('read_text_file', { path });
+      if (!content) {
+        checkMessage = 'File is empty or unreadable';
+        checklistItems[0].passed = false;
+        checklistItems[1].passed = false;
+        return;
+      }
+      
+      const mergeMeshesMatch = /MergeMeshes\s+([01])/.exec(content);
+      const mergeTriMeshesMatch = /MergeTriMeshes\s+([01])/.exec(content);
+      
+      const mergeMeshesValue = mergeMeshesMatch ? parseInt(mergeMeshesMatch[1]) : null;
+      const mergeTriMeshesValue = mergeTriMeshesMatch ? parseInt(mergeTriMeshesMatch[1]) : null;
+      
+      checklistItems[0].passed = mergeMeshesValue === 0;
+      checklistItems[0].checked = mergeMeshesValue !== null;
+      checklistItems[0].fixed = false;
+      
+      checklistItems[1].passed = mergeTriMeshesValue === 0;
+      checklistItems[1].checked = mergeTriMeshesValue !== null;
+      checklistItems[1].fixed = false;
+      
+      const allPassed = checklistItems.every(item => item.passed);
+      if (allPassed) {
+        checkMessage = '✓ All requirements met. Ready to use.';
+      } else {
+        const failed = checklistItems.filter(item => !item.passed && item.checked).map(item => item.label);
+        checkMessage = failed.length > 0 ? `⚠ must Uncheck ${failed.join(', ')}` : '⚠ Some values should uncheck';
+      }
+    } catch (e) {
+      console.error('Failed to check file content', e);
+      checkMessage = `Error: ${String(e).slice(0, 50)}`;
+    } finally {
+      isCheckingFile = false;
+    }
+  }
+  
+  async function fixFileContent(path: string) {
+    isFixingFile = true;
+    checkMessage = '';
+    try {
+      const content = await invoke<string>('read_text_file', { path });
+      if (!content) {
+        checkMessage = 'File is empty or unreadable';
+        return;
+      }
+      
+      const nl = content.includes('\r\n') ? '\r\n' : '\n';
+      let updated = content;
+      let fixedCount = 0;
+      
+      const replaceMergeMeshes = (text: string): string => {
+        return text.replace(/^([ \t]*MergeMeshes[ \t]+)([01])([ \t]*)$/gm, '$10$3');
+      };
+      
+      const mergeTriMeshes = (text: string): string => {
+        return text.replace(/^([ \t]*MergeTriMeshes[ \t]+)([01])([ \t]*)$/gm, '$10$3');
+      };
+      
+      const before1 = updated;
+      updated = replaceMergeMeshes(updated);
+      if (updated !== before1) {
+        checklistItems[0].fixed = true;
+        fixedCount++;
+      }
+      
+      const before2 = updated;
+      updated = mergeTriMeshes(updated);
+      if (updated !== before2) {
+        checklistItems[1].fixed = true;
+        fixedCount++;
+      }
+      
+      if (!updated.match(/^[ \t]*MergeMeshes[ \t]+[01][ \t]*$/m)) {
+        const fbxMatch = updated.match(/^[ \t]*FBXResourceClass\b.*\{[ \t]*$/m);
+        if (fbxMatch) {
+          const lineEnd = updated.indexOf('\n', fbxMatch.index! + fbxMatch[0].length);
+          const insertPos = lineEnd === -1 ? fbxMatch.index! + fbxMatch[0].length : lineEnd + 1;
+          const indent = fbxMatch[0].match(/^[ \t]*/)?.[0] || '';
+          updated = updated.slice(0, insertPos) + indent + ' MergeMeshes 0' + nl + updated.slice(insertPos);
+          checklistItems[0].fixed = true;
+          fixedCount++;
+        }
+      }
+      
+      if (!updated.match(/^[ \t]*MergeTriMeshes[ \t]+[01][ \t]*$/m)) {
+        const fbxMatch = updated.match(/^[ \t]*FBXResourceClass\b.*\{[ \t]*$/m);
+        if (fbxMatch) {
+          const lineEnd = updated.indexOf('\n', fbxMatch.index! + fbxMatch[0].length);
+          const insertPos = lineEnd === -1 ? fbxMatch.index! + fbxMatch[0].length : lineEnd + 1;
+          const indent = fbxMatch[0].match(/^[ \t]*/)?.[0] || '';
+          updated = updated.slice(0, insertPos) + indent + ' MergeTriMeshes 0' + nl + updated.slice(insertPos);
+          checklistItems[1].fixed = true;
+          fixedCount++;
+        }
+      }
+      
+      if (updated !== content) {
+        await invoke('write_text_file', { path, content: updated });
+        checkMessage = `✓ Fixed ${fixedCount} issue(s). Reloading...`;
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        await checkFileContent(path);
+        await loadMetaAndPopulate(path);
+        
+        checkMessage = `✓ Fixed and reloaded. Exporting...`;
+        await new Promise(resolve => setTimeout(resolve, 200));
+        scheduleReexport();
+        checkMessage = `✓ Fixed successfully!`;
+      } else {
+        checkMessage = 'No changes needed.';
+      }
+    } catch (e) {
+      console.error('Failed to fix file content', e);
+      checkMessage = `Error during fix: ${String(e).slice(0, 50)}`;
+    } finally {
+      isFixingFile = false;
+    }
+  }
   // VIS input variables driven by group toggles (Base and Zone letters)
   let visInputs = $state<Record<string, boolean>>({});
   function delay(ms: number) { return new Promise<void>(res => setTimeout(res, ms)); }
@@ -205,9 +337,13 @@
     const lower = p.toLowerCase();
     if (lower.endsWith('.xob.meta')) {
       filePath = p;
+      showFilePopup = true;
+      checkFileContent(filePath);
       loadMetaAndPopulate(filePath);
     } else if (lower.endsWith('.xob')) {
       filePath = p + '.meta';
+      showFilePopup = true;
+      checkFileContent(filePath);
       loadMetaAndPopulate(filePath);
     } else {
       // ignore other extensions
@@ -899,20 +1035,12 @@
       </div>
     </div>
     <div class="row">
+      <label class="lbl" for="wb-port">Workbench Port</label>
+      <input id="wb-port" class="port" type="number" min="1" max="65535" bind:value={wbPort} onchange={saveWbPort} />
       <div class="push-right">
         <span class="warntext">โปรดกด Show All ก่อนส่งตรวจงาน</span>
         <button class="capsule success" onclick={showAll} disabled={!filePath || isLoading}>Show All</button>
         <button class="capsule danger" onclick={hideAll} disabled={!filePath || isLoading}>Hide All</button>
-      </div>
-    </div>
-    <div class="row">
-      <label class="lbl" for="wb-port">Workbench Port</label>
-      <input id="wb-port" class="port" type="number" min="1" max="65535" bind:value={wbPort} onchange={saveWbPort} />
-      <div class="push-right">
-        <button class="capsule" onclick={refreshList} disabled={!filePath || isLoading}>{isLoading ? 'Loading…' : 'Refresh'}</button>
-        {#if !realtimeMode}
-          <button class="capsule warn" onclick={exportToWorkbench} disabled={!filePath || isLoading}>Preview</button>
-        {/if}
       </div>
     </div>
     <div class="row">
@@ -932,6 +1060,12 @@
           <button class="capsule" onclick={startRemote}>Start Remote</button>
         {/if}
       {/if}
+      <div class="push-right">
+        <button class="capsule" onclick={refreshList} disabled={!filePath || isLoading}>{isLoading ? 'Loading…' : 'Refresh'}</button>
+        {#if !realtimeMode}
+          <button class="capsule warn" onclick={exportToWorkbench} disabled={!filePath || isLoading}>Preview</button>
+        {/if}
+      </div>
     </div>
   </section>
   <!-- Resizable 2-column tree table -->
@@ -970,6 +1104,67 @@
       <div class="qr-box" role="document" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); showQr = false; } }}>
         <img alt="Remote URL QR" src={`https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=${encodeURIComponent(tunnelUrl)}`}/>
         <div class="qr-caption">Click anywhere to close</div>
+      </div>
+    </div>
+  {/if}
+  {#if showFilePopup}
+    <div class="file-popup-overlay" role="dialog" aria-modal="true" aria-label="Pre-Usage File Validation" tabindex="0" onclick={() => showFilePopup = false} onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); showFilePopup = false; } }}>
+      <div class="file-popup-box" role="document" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); showFilePopup = false; } }}>
+        <div class="popup-header">
+          <img class="popup-icon-img" src="/icon/ChineseNewYear/owl_Chinese.png" alt="Owl" />
+          <h2 class="popup-title">Check file</h2>
+        </div>
+        
+        <div class="validation-content">
+          <div class="checklist-container">
+            {#each checklistItems as item (item.id)}
+              <div class="checklist-item" class:passed={item.passed} class:failed={!item.passed && item.checked}>
+                <div class="checklist-row">
+                  <span class="status-icon">
+                    {#if item.passed}
+                      ✅
+                    {:else if item.checked}
+                      ❌
+                    {:else}
+                      <span class="icon-unknown">?</span>
+                    {/if}
+                  </span>
+                  <span class="label-cell">
+                    {item.label}
+                  </span>
+                  {#if item.fixed}
+                    <span class="fixed-badge">Fixed</span>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+          
+          {#if checkMessage}
+            <div class="check-message" class:success={checklistItems.every(i => i.passed)} class:warning={!checklistItems.every(i => i.passed)}>
+              {checkMessage}
+            </div>
+          {/if}
+        </div>
+        
+        <div class="popup-actions">
+          {#if !checklistItems.every(i => i.passed)}
+            <button 
+              class="popup-fix-btn" 
+              disabled={isFixingFile || isCheckingFile}
+              onclick={async () => { await fixFileContent(filePath); }}
+            >
+              {isFixingFile ? 'Fixing...' : 'Auto-Fix'}
+            </button>
+          {/if}
+          <button 
+            class="popup-close-btn" 
+            disabled={isFixingFile || isCheckingFile}
+            onclick={() => { showFilePopup = false; }}
+          >
+            {checklistItems.every(i => i.passed) ? 'Continue' : 'Cancel'}
+          </button>
+        </div>
       </div>
     </div>
   {/if}
@@ -1028,7 +1223,7 @@
   .drop-capture.show { opacity: 1; pointer-events: none; }
   /* Table styles */
   .datatable { position: relative; display: flex; flex-direction: column; width: 100%; box-sizing: border-box; border: 1px solid #3f3f3f; border-radius: 8px; background: rgba(255,255,255,0.02); margin-top: 12px; flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-  .trow { position: relative; width: 100%; display: grid; align-items: center; grid-template-columns: var(--group-pct, 80%) calc(100% - var(--group-pct, 80%)); border-top: 1px solid #2f2f2f; }
+  .trow { position: relative; width: 100%; display: grid; align-items: center; grid-template-columns: var(--group-pct, 80%) calc(100% - var(--group-pct, 80%)); border-top: 1px solid #2f2f2f; transition: background-color 0.12s ease; }
   .trow:first-child { border-top: 0; }
   .trow::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: transparent; opacity: .9; }
   .trow.thead::before { display: none; }
@@ -1037,6 +1232,8 @@
   /* Row background tint matching the toggle button colors */
   .trow:not(.thead)[data-state="Open"] { background-color: rgba(46, 125, 50, 0.18); }
   .trow:not(.thead)[data-state="Hide"] { background-color: rgba(183, 28, 28, 0.18); }
+  /* Hover effect for rows */
+  .trow:not(.thead):hover { background-color: rgba(138, 180, 248, 0.12); }
   .tcell { padding: 12px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
   .tcell.thead { position: sticky; top: 0; z-index: 1; font-weight: 600; background: rgba(255,255,255,0.06); backdrop-filter: saturate(120%) blur(2px); }
   .tcell.tstatus { text-align: right; opacity: 0.9; }
@@ -1087,4 +1284,54 @@
   .qr-box { background: rgba(20,20,20,0.9); border: 1px solid #4a4a4a; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 92vmin; }
   .qr-box img { width: min(80vmin, 600px); height: min(80vmin, 600px); image-rendering: pixelated; }
   .qr-caption { color: #cbd5ff; opacity: 0.85; font-size: 12px; }
+  /* File Popup Styles */
+  .file-popup-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 1001; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .file-popup-box { background: rgba(20,20,20,0.95); border: 1px solid #4a4a4a; border-radius: 12px; padding: 32px; display: flex; flex-direction: column; align-items: center; gap: 24px; max-width: 400px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+  .popup-icon-img { width: 128px; height: 128px; object-fit: contain; }
+  .popup-header { display: flex; align-items: center; gap: 16px; width: 100%; }
+  .popup-title { margin: 0; font-size: 18px; font-weight: 600; color: #eaeaea; }
+  .validation-content { width: 100%; }
+  .checklist-container { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .checklist-item { padding: 12px; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid #3a3a3a; transition: background 0.12s, border-color 0.12s; }
+  .checklist-item.passed { background: rgba(76,175,80,0.08); border-color: rgba(76,175,80,0.3); }
+  .checklist-item.failed { background: rgba(244,67,54,0.08); border-color: rgba(244,67,54,0.3); }
+  .checklist-row { display: flex; align-items: center; gap: 12px; }
+  .status-icon { flex: 0 0 auto; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 18px; }
+  .icon-unknown { color: #ff9800; }
+  .label-cell { flex: 1; color: #eaeaea; font-size: 14px; user-select: none; }
+  .fixed-badge { flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; background: rgba(76,175,80,0.25); color: #4caf50; font-size: 11px; font-weight: 600; }
+  .check-message { padding: 12px; border-radius: 8px; margin-top: 12px; font-size: 13px; text-align: center; }
+  .check-message.success { background: rgba(76,175,80,0.12); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
+  .check-message.warning { background: rgba(244,67,54,0.12); color: #ff5252; border: 1px solid rgba(244,67,54,0.3); }
+  .popup-actions { display: flex; gap: 12px; width: 100%; margin-top: 8px; }
+  .popup-fix-btn, .popup-close-btn { flex: 1; padding: 10px 16px; border-radius: 6px; border: 1px solid #8ab4f8; background: rgba(138,180,248,0.15); color: #8ab4f8; cursor: pointer; font-weight: 500; transition: background 0.12s, color 0.12s; }
+  .popup-fix-btn:hover:not(:disabled), .popup-close-btn:hover:not(:disabled) { background: rgba(138,180,248,0.25); }
+  .popup-fix-btn:active:not(:disabled), .popup-close-btn:active:not(:disabled) { background: rgba(138,180,248,0.35); }
+  .popup-fix-btn:disabled, .popup-close-btn:disabled { opacity: 0.5; cursor: default; }
+  .popup-fix-btn { background: rgba(76,175,80,0.15); border-color: #4caf50; color: #4caf50; }
+  .popup-fix-btn:hover:not(:disabled) { background: rgba(76,175,80,0.25); }
+  .popup-fix-btn:active:not(:disabled) { background: rgba(76,175,80,0.35); }
+  @media (prefers-color-scheme: light) {
+    .file-popup-box { background: rgba(245,245,245,0.98); border-color: #cfcfcf; }
+    .popup-title { color: #222; }
+    .label-cell { color: #222; }
+    .checklist-item { background: rgba(0,0,0,0.02); border-color: #e0e0e0; }
+    .checklist-item.passed { background: rgba(76,175,80,0.08); border-color: rgba(76,175,80,0.3); }
+    .checklist-item.failed { background: rgba(244,67,54,0.08); border-color: rgba(244,67,54,0.3); }
+    .check-message { background: rgba(76,175,80,0.08); color: #2e7d32; border-color: rgba(76,175,80,0.3); }
+    .check-message.warning { background: rgba(244,67,54,0.08); color: #c62828; border-color: rgba(244,67,54,0.3); }
+    .popup-fix-btn, .popup-close-btn { border-color: #4a90e2; background: rgba(74,144,226,0.12); color: #4a90e2; }
+    .popup-fix-btn:hover:not(:disabled), .popup-close-btn:hover:not(:disabled) { background: rgba(74,144,226,0.2); }
+    .popup-fix-btn:active:not(:disabled), .popup-close-btn:active:not(:disabled) { background: rgba(74,144,226,0.3); }
+    .popup-fix-btn { background: rgba(76,175,80,0.12); border-color: #4caf50; color: #2e7d32; }
+    .popup-fix-btn:hover:not(:disabled) { background: rgba(76,175,80,0.2); }
+    .popup-fix-btn:active:not(:disabled) { background: rgba(76,175,80,0.3); }
+  }
+  :global(body.theme-dark) .file-popup-box { background: #1a1a1a; border-color: #343434; }
+  :global(body.theme-dark) .popup-title { color: #ffffff; }
+  :global(body.theme-dark) .label-cell { color: #ffffff; }
+  :global(body.theme-dark) .popup-fix-btn, :global(body.theme-dark) .popup-close-btn { border-color: #8ab4f8; background: rgba(138,180,248,0.2); color: #8ab4f8; }
+  :global(body.theme-dark) .popup-fix-btn:hover:not(:disabled), :global(body.theme-dark) .popup-close-btn:hover:not(:disabled) { background: rgba(138,180,248,0.3); }
+  :global(body.theme-dark) .popup-fix-btn { background: rgba(76,175,80,0.2); border-color: #4caf50; color: #81c784; }
+  :global(body.theme-dark) .popup-fix-btn:hover:not(:disabled) { background: rgba(76,175,80,0.3); }
 </style>
