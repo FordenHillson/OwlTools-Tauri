@@ -167,7 +167,13 @@
     isDragOver = false;
     const dt = e.dataTransfer;
     if (!dt) return;
-    if (dt.files && dt.files.length > 0) return;
+    // Try to get files from dataTransfer (fallback for when Tauri events don't fire)
+    if (dt.files && dt.files.length > 0) {
+      const first = dt.files[0];
+      const path = (first as any)?.path || first.name;
+      if (typeof path === 'string') applyDroppedPath(path);
+      return;
+    }
     const raw = extractWorkbenchText(dt);
     if (!raw) return;
     let parsed = parseWorkbenchDrag(raw);
@@ -269,7 +275,13 @@
     window.dispatchEvent(new CustomEvent('app:set-module-drag-active', { detail: false }));
     const dt = e.dataTransfer;
     if (!dt) return;
-    if (dt.files && dt.files.length > 0) return;
+    // Try to get files from dataTransfer (fallback for when Tauri events don't fire)
+    if (dt.files && dt.files.length > 0) {
+      const first = dt.files[0];
+      const path = (first as any)?.path || first.name;
+      if (typeof path === 'string') applyDroppedPathCreate(path);
+      return;
+    }
     const raw = extractWorkbenchText(dt);
     if (!raw) return;
     let parsed = parseWorkbenchDrag(raw);
