@@ -211,20 +211,23 @@
     if (!dt) return;
     const allowed = (dt.effectAllowed || '').toLowerCase();
     const types = Array.from((dt.types || []) as any);
-    // If no OS files are offered, prefer link (external app linking semantics)
-    if (!dt.files || dt.files.length === 0) {
-      dt.dropEffect = 'link';
-      return;
-    }
-    // Prefer semantics by data type first
-    if (types.includes('text/uri-list')) {
-      dt.dropEffect = 'link';
-      return;
-    }
-    if (types.includes('Files')) {
+    
+    // Check for file types (case-insensitive and handle variations)
+    const hasFiles = types.some(t => {
+      const lower = String(t).toLowerCase();
+      return lower === 'files' || lower.includes('file');
+    });
+    if (hasFiles || (dt.files && dt.files.length > 0)) {
       dt.dropEffect = 'copy';
       return;
     }
+    
+    // Check for text/uri-list or similar
+    if (types.includes('text/uri-list') || types.some(t => String(t).includes('uri'))) {
+      dt.dropEffect = 'link';
+      return;
+    }
+    
     // Prefer copy if allowed, otherwise use link if that's what's offered by the source app
     if (allowed === 'none') {
       dt.dropEffect = 'none';

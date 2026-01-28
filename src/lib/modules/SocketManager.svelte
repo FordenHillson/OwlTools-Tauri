@@ -31,19 +31,31 @@
     const dt = e.dataTransfer;
     if (!dt) return;
     const types = Array.from((dt.types || []) as any);
-    if (types.includes('text/uri-list')) {
-      dt.dropEffect = 'link';
-      return;
-    }
-    if (types.includes('Files')) {
+    // Check for file types (case-insensitive and handle variations)
+    const hasFiles = types.some(t => {
+      const lower = String(t).toLowerCase();
+      return lower === 'files' || lower.includes('file');
+    });
+    if (hasFiles) {
       dt.dropEffect = 'copy';
       return;
     }
+    // Check for text/uri-list or similar
+    if (types.includes('text/uri-list') || types.some(t => String(t).includes('uri'))) {
+      dt.dropEffect = 'link';
+      return;
+    }
+    // Fallback: always set a valid dropEffect
     const allowed = (dt.effectAllowed || '').toLowerCase();
-    if (allowed.includes('copy') || allowed === 'all' || allowed === 'uninitialized' || allowed === '') dt.dropEffect = 'copy';
-    else if (allowed.includes('link')) dt.dropEffect = 'link';
-    else if (allowed.includes('move')) dt.dropEffect = 'move';
-    else dt.dropEffect = 'copy';
+    if (allowed.includes('copy') || allowed === 'all' || allowed === 'uninitialized' || allowed === '') {
+      dt.dropEffect = 'copy';
+    } else if (allowed.includes('link')) {
+      dt.dropEffect = 'link';
+    } else if (allowed.includes('move')) {
+      dt.dropEffect = 'move';
+    } else {
+      dt.dropEffect = 'copy';
+    }
   }
 
   function parseWorkbenchDrag(data: string): string | null {
