@@ -454,6 +454,7 @@
       fullV2Guid = String(r.v2_guid || '');
       fullV2Path = String(r.v2_path || '');
       fullZones = Array.isArray(r.zones) ? (r.zones as FullDstZone[]) : [];
+      zones = clampInt(fullZones.length || 1, 1, 26);
       fullSel = null;
       persistFullForActive();
       pushLog('INFO', `Scan full dst done. Found ${fullZones.length} zone(s).`);

@@ -155,9 +155,29 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
         }
     }
 
+    // Determine which part IDs exist.
+    // Previously we built zones only from debris. That breaks collider replacement when a model has
+    // no dbr files. Include parts inferred from GeometryParam names as well.
+    let mut part_ids: BTreeMap<String, ()> = BTreeMap::new();
+    for pid in debris_by_part.keys() {
+        part_ids.insert(pid.clone(), ());
+    }
+    {
+        let re_part = Regex::new(r"(?i)(?:id-|fdst_id-|vis-|vis-!)(?P<p>[a-z])").unwrap();
+        for n in &geom_params {
+            if let Some(c) = re_part.captures(n) {
+                let pid = c.name("p").map(|m| m.as_str()).unwrap_or("").to_uppercase();
+                if pid.len() == 1 {
+                    part_ids.insert(pid, ());
+                }
+            }
+        }
+    }
+
     // Sort debris by dbr number and build zones list.
     let mut zones: Vec<FullDstZoneInfo> = Vec::new();
-    for (pid, mut items) in debris_by_part {
+    for (pid, _) in part_ids {
+        let mut items = debris_by_part.remove(&pid).unwrap_or_default();
         items.sort_by_key(|(n, _)| *n);
         let debris: Vec<MetaEntry> = items.into_iter().map(|(_, e)| e).collect();
         let mut colliders: Vec<String> = geom_params
@@ -1737,6 +1757,36 @@ async fn prefabdst_build(
         let gen_key = hdr.generator.trim().to_lowercase();
         emit_prefabdst_log(&app, "info", format!("Generator: {}", if gen_key.is_empty() { "(unknown)" } else { &gen_key }), Some(cur), Some(total));
 
+        // For zone_fractal presets, auto-detect the number of zones from GeometryParam part tags (A-Z)
+        // via the same scan used for debris/collider marker replacement.
+        let mut full_scan: Option<FullDstScanResult> = None;
+        let mut zones_for_this_file = zones;
+        if gen_key != "template" {
+            match prefabdst_scan_full_dst(xob_path.to_string()).await {
+                Ok(scan) => {
+                    let inferred = scan.zones.len().clamp(1, 26);
+                    zones_for_this_file = inferred;
+                    full_scan = Some(scan);
+                    emit_prefabdst_log(
+                        &app,
+                        "info",
+                        format!("Auto zones: {} (from GeometryParam tags)", inferred),
+                        Some(cur),
+                        Some(total)
+                    );
+                }
+                Err(e) => {
+                    emit_prefabdst_log(
+                        &app,
+                        "warn",
+                        format!("Auto zones skipped (full dst scan failed): {}", e),
+                        Some(cur),
+                        Some(total)
+                    );
+                }
+            }
+        }
+
         emit_prefabdst_log(&app, "info", "Generating ET text...", Some(cur), Some(total));
         let mut et_text = if gen_key == "template" {
             // scr_destructible template rendering (auto-scan dst)
@@ -1749,7 +1799,7 @@ async fn prefabdst_build(
                 &base_res,
                 v2_guid.as_deref(),
                 v2_res.as_deref(),
-                zones,
+                zones_for_this_file,
                 hp_zone,
             )
         };
@@ -1757,13 +1807,16 @@ async fn prefabdst_build(
         // For zone_fractal presets, fill debris/collider markers using a scan that matches the UI tree.
         if gen_key != "template" {
             if et_text.contains("{{DEBRIS_ID-") || et_text.contains("{{COLLIDERS_ID-") {
-                match prefabdst_scan_full_dst(xob_path.to_string()).await {
-                    Ok(scan) => {
-                        et_text = replace_full_dst_markers(&et_text, &scan);
-                    }
-                    Err(e) => {
-                        emit_prefabdst_log(&app, "warn", format!("Full DST scan failed (markers not replaced): {}", e), Some(cur), Some(total));
-                    }
+                if let Some(scan) = full_scan.as_ref() {
+                    et_text = replace_full_dst_markers(&et_text, scan);
+                } else {
+                    emit_prefabdst_log(
+                        &app,
+                        "warn",
+                        "Full DST scan unavailable (markers not replaced)".to_string(),
+                        Some(cur),
+                        Some(total)
+                    );
                 }
             }
         }
