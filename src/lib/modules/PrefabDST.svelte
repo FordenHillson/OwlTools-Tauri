@@ -350,6 +350,50 @@
     | null = $state(null);
   let lastFullScanKey = $state<string>('');
 
+  let fullExpanded = $state<Record<string, boolean>>({});
+  let fullCatExpanded = $state<Record<string, boolean>>({});
+  let scrExpanded = $state<Record<string, boolean>>({});
+
+  function isFullZoneExpanded(pid: string): boolean {
+    const k = String(pid || '');
+    const v = fullExpanded[k];
+    return v !== false;
+  }
+
+  function toggleFullZoneExpanded(pid: string) {
+    const k = String(pid || '');
+    const cur = isFullZoneExpanded(k);
+    fullExpanded = { ...fullExpanded, [k]: !cur };
+  }
+
+  function fullCatKey(pid: string, cat: 'debris' | 'colliders'): string {
+    return `${String(pid || '')}:${cat}`;
+  }
+
+  function isFullCatExpanded(pid: string, cat: 'debris' | 'colliders'): boolean {
+    const k = fullCatKey(pid, cat);
+    const v = fullCatExpanded[k];
+    return v !== false;
+  }
+
+  function toggleFullCatExpanded(pid: string, cat: 'debris' | 'colliders') {
+    const k = fullCatKey(pid, cat);
+    const cur = isFullCatExpanded(pid, cat);
+    fullCatExpanded = { ...fullCatExpanded, [k]: !cur };
+  }
+
+  function isScrPhaseExpanded(pid: string): boolean {
+    const k = String(pid || '');
+    const v = scrExpanded[k];
+    return v !== false;
+  }
+
+  function toggleScrPhaseExpanded(pid: string) {
+    const k = String(pid || '');
+    const cur = isScrPhaseExpanded(k);
+    scrExpanded = { ...scrExpanded, [k]: !cur };
+  }
+
   let filesDropEl: HTMLElement | null = null;
   let filesIsDragOver = $state<boolean>(false);
   function updateFilesHoverFromCoords(ev: any) {
@@ -858,7 +902,7 @@
         <div class="col path"><strong>value</strong></div>
       </div>
       <div
-        class="tree-row {fullSel && fullSel.kind==='base' ? 'sel' : ''}"
+        class="tree-row level-0 {fullSel && fullSel.kind==='base' ? 'sel' : ''}"
         role="treeitem"
         tabindex="0"
         aria-selected={!!(fullSel && fullSel.kind==='base')}
@@ -869,7 +913,7 @@
         <div class="col path">{fullBasePath || '(not found)'}</div>
       </div>
       <div
-        class="tree-row {fullSel && fullSel.kind==='v2' ? 'sel' : ''}"
+        class="tree-row level-0 {fullSel && fullSel.kind==='v2' ? 'sel' : ''}"
         role="treeitem"
         tabindex="0"
         aria-selected={!!(fullSel && fullSel.kind==='v2')}
@@ -882,44 +926,109 @@
 
       {#each fullZones as z (z.part_id)}
         <div
-          class="tree-row {fullSel && fullSel.kind==='zone' && fullSel.part_id===z.part_id ? 'sel' : ''}"
+          class="tree-row level-0 {fullSel && fullSel.kind==='zone' && fullSel.part_id===z.part_id ? 'sel' : ''}"
           role="treeitem"
           tabindex="0"
           aria-selected={!!(fullSel && fullSel.kind==='zone' && fullSel.part_id===z.part_id)}
           onclick={() => (fullSel = { kind: 'zone', part_id: z.part_id })}
           onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'zone', part_id: z.part_id }; } }}
         >
-          <div class="col name">Zone {z.part_id}</div>
+          <div class="col name">
+            <button
+              class="expander"
+              type="button"
+              aria-label={isFullZoneExpanded(z.part_id) ? 'Collapse' : 'Expand'}
+              onclick={(e) => { e.stopPropagation(); toggleFullZoneExpanded(z.part_id); }}
+              onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); e.stopPropagation(); toggleFullZoneExpanded(z.part_id); } }}
+            >
+              {isFullZoneExpanded(z.part_id) ? '▾' : '▸'}
+            </button>
+            Zone {z.part_id}
+          </div>
           <div class="col path">debris: {z.debris.length}, collider: {z.colliders.length}</div>
         </div>
 
-        {#each z.debris as db, i (`${z.part_id}-d-${i}`)}
+        {#if isFullZoneExpanded(z.part_id)}
           <div
-            class="tree-row debris {fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i ? 'sel' : ''}"
+            class="tree-row category level-1"
             role="treeitem"
             tabindex="0"
-            aria-selected={!!(fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i)}
-            onclick={() => (fullSel = { kind: 'debris', part_id: z.part_id, idx: i })}
-            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'debris', part_id: z.part_id, idx: i }; } }}
+            aria-selected={false}
+            aria-expanded={isFullCatExpanded(z.part_id, 'debris')}
+            onclick={() => toggleFullCatExpanded(z.part_id, 'debris')}
+            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); toggleFullCatExpanded(z.part_id, 'debris'); } }}
           >
-            <div class="col name">debris dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
-            <div class="col path">{db.path}</div>
+            <div class="col name">
+              <button
+                class="expander"
+                type="button"
+                aria-label={isFullCatExpanded(z.part_id, 'debris') ? 'Collapse' : 'Expand'}
+                onclick={(e) => { e.stopPropagation(); toggleFullCatExpanded(z.part_id, 'debris'); }}
+                onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); e.stopPropagation(); toggleFullCatExpanded(z.part_id, 'debris'); } }}
+              >
+                {isFullCatExpanded(z.part_id, 'debris') ? '▾' : '▸'}
+              </button>
+              Debris
+            </div>
+            <div class="col path">{z.debris.length}</div>
           </div>
-        {/each}
 
-        {#each z.colliders as c, j (`${z.part_id}-c-${j}`)}
+          {#if isFullCatExpanded(z.part_id, 'debris')}
+            {#each z.debris as db, i (`${z.part_id}-d-${i}`)}
+              <div
+                class="tree-row debris level-2 {fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i ? 'sel' : ''}"
+                role="treeitem"
+                tabindex="0"
+                aria-selected={!!(fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i)}
+                onclick={() => (fullSel = { kind: 'debris', part_id: z.part_id, idx: i })}
+                onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'debris', part_id: z.part_id, idx: i }; } }}
+              >
+                <div class="col name">debris dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
+                <div class="col path">{db.path}</div>
+              </div>
+            {/each}
+          {/if}
+
           <div
-            class="tree-row debris {fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j ? 'sel' : ''}"
+            class="tree-row category level-1"
             role="treeitem"
             tabindex="0"
-            aria-selected={!!(fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j)}
-            onclick={() => (fullSel = { kind: 'collider', part_id: z.part_id, idx: j })}
-            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'collider', part_id: z.part_id, idx: j }; } }}
+            aria-selected={false}
+            aria-expanded={isFullCatExpanded(z.part_id, 'colliders')}
+            onclick={() => toggleFullCatExpanded(z.part_id, 'colliders')}
+            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); toggleFullCatExpanded(z.part_id, 'colliders'); } }}
           >
-            <div class="col name">collider {j + 1}</div>
-            <div class="col path">{c}</div>
+            <div class="col name">
+              <button
+                class="expander"
+                type="button"
+                aria-label={isFullCatExpanded(z.part_id, 'colliders') ? 'Collapse' : 'Expand'}
+                onclick={(e) => { e.stopPropagation(); toggleFullCatExpanded(z.part_id, 'colliders'); }}
+                onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); e.stopPropagation(); toggleFullCatExpanded(z.part_id, 'colliders'); } }}
+              >
+                {isFullCatExpanded(z.part_id, 'colliders') ? '▾' : '▸'}
+              </button>
+              Colliders
+            </div>
+            <div class="col path">{z.colliders.length}</div>
           </div>
-        {/each}
+
+          {#if isFullCatExpanded(z.part_id, 'colliders')}
+            {#each z.colliders as c, j (`${z.part_id}-c-${j}`)}
+              <div
+                class="tree-row debris level-2 {fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j ? 'sel' : ''}"
+                role="treeitem"
+                tabindex="0"
+                aria-selected={!!(fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j)}
+                onclick={() => (fullSel = { kind: 'collider', part_id: z.part_id, idx: j })}
+                onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'collider', part_id: z.part_id, idx: j }; } }}
+              >
+                <div class="col name">collider {j + 1}</div>
+                <div class="col path">{c}</div>
+              </div>
+            {/each}
+          {/if}
+        {/if}
       {/each}
     </div>
   {/if}
@@ -945,21 +1054,34 @@
         <div class="col name"><strong>phase/debris</strong></div>
         <div class="col path"><strong>Path file</strong></div>
       </div>
-      <div class="tree-row {scrSel && scrSel.kind==='base' ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='base')} onclick={() => (scrSel = { kind: 'base' })} ondblclick={() => onTreeDblClick('base')} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'base' }; } }}>
+      <div class="tree-row level-0 {scrSel && scrSel.kind==='base' ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='base')} onclick={() => (scrSel = { kind: 'base' })} ondblclick={() => onTreeDblClick('base')} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'base' }; } }}>
         <div class="col name">BASE {scrBaseGuid ? `{${scrBaseGuid}}` : '{ }'}</div>
         <div class="col path">{scrBasePath || '(not found)'}</div>
       </div>
       {#each scrPhases as ph (ph.pid)}
-        <div class="tree-row {scrSel && scrSel.kind==='phase' && scrSel.pid===ph.pid ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='phase' && scrSel.pid===ph.pid)} onclick={() => (scrSel = { kind: 'phase', pid: ph.pid })} ondblclick={() => onTreeDblClick('phase', ph.pid)} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'phase', pid: ph.pid }; } }}>
-          <div class="col name">dst_{ph.pid} {ph.model_guid ? `{${ph.model_guid}}` : '{ }'}</div>
+        <div class="tree-row level-0 {scrSel && scrSel.kind==='phase' && scrSel.pid===ph.pid ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='phase' && scrSel.pid===ph.pid)} onclick={() => (scrSel = { kind: 'phase', pid: ph.pid })} ondblclick={() => onTreeDblClick('phase', ph.pid)} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'phase', pid: ph.pid }; } }}>
+          <div class="col name">
+            <button
+              class="expander"
+              type="button"
+              aria-label={isScrPhaseExpanded(ph.pid) ? 'Collapse' : 'Expand'}
+              onclick={(e) => { e.stopPropagation(); toggleScrPhaseExpanded(ph.pid); }}
+              onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); e.stopPropagation(); toggleScrPhaseExpanded(ph.pid); } }}
+            >
+              {isScrPhaseExpanded(ph.pid) ? '▾' : '▸'}
+            </button>
+            dst_{ph.pid} {ph.model_guid ? `{${ph.model_guid}}` : '{ }'}
+          </div>
           <div class="col path">{ph.model_path}</div>
         </div>
-        {#each ph.debris as db, i (`${ph.pid}-${i}`)}
-          <div class="tree-row debris {scrSel && scrSel.kind==='debris' && scrSel.pid===ph.pid && scrSel.idx===i ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='debris' && scrSel.pid===ph.pid && scrSel.idx===i)} onclick={() => (scrSel = { kind: 'debris', pid: ph.pid, idx: i })} ondblclick={() => onTreeDblClick('debris', ph.pid, i)} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'debris', pid: ph.pid, idx: i }; } }}>
-            <div class="col name">dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
-            <div class="col path">{db.path}</div>
-          </div>
-        {/each}
+        {#if isScrPhaseExpanded(ph.pid)}
+          {#each ph.debris as db, i (`${ph.pid}-${i}`)}
+            <div class="tree-row debris level-1 {scrSel && scrSel.kind==='debris' && scrSel.pid===ph.pid && scrSel.idx===i ? 'sel' : ''}" role="treeitem" tabindex="0" aria-selected={!!(scrSel && scrSel.kind==='debris' && scrSel.pid===ph.pid && scrSel.idx===i)} onclick={() => (scrSel = { kind: 'debris', pid: ph.pid, idx: i })} ondblclick={() => onTreeDblClick('debris', ph.pid, i)} onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); scrSel = { kind: 'debris', pid: ph.pid, idx: i }; } }}>
+              <div class="col name">dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
+              <div class="col path">{db.path}</div>
+            </div>
+          {/each}
+        {/if}
       {/each}
     </div>
   {/if}
@@ -1137,6 +1259,42 @@
     white-space: nowrap;
     border: 0;
   }
+
+  .expander {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.18);
+    color: rgba(255, 255, 255, 0.78);
+    cursor: pointer;
+    padding: 0;
+    flex: 0 0 auto;
+  }
+
+  .expander:hover { filter: brightness(1.1); }
+
+  :global(body.theme-light) .expander {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(17, 17, 17, 0.14);
+    color: rgba(17, 17, 17, 0.78);
+  }
+
+  .tree-row.category {
+    background: rgba(0, 0, 0, 0.10);
+  }
+
+  :global(body.theme-light) .tree-row.category {
+    background: rgba(255, 255, 255, 0.45);
+  }
+
+  .tree-row.level-0 .col.name { padding-left: 6px; }
+  .tree-row.level-1 .col.name { padding-left: 26px; }
+  .tree-row.level-2 .col.name { padding-left: 46px; }
 
   .chip-x {
     border: 0;

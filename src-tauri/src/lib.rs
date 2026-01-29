@@ -180,22 +180,11 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
         let mut items = debris_by_part.remove(&pid).unwrap_or_default();
         items.sort_by_key(|(n, _)| *n);
         let debris: Vec<MetaEntry> = items.into_iter().map(|(_, e)| e).collect();
-        let mut colliders: Vec<String> = geom_params
+        let colliders: Vec<String> = geom_params
             .iter()
             .filter(|n| geometry_param_belongs_to_part(n, &pid))
             .cloned()
             .collect();
-
-        // Always append the per-part FDST collider tag derived from the base file name.
-        // Example: UTM_House_Village_E_1L01_V2_dst_FDST_ID-A
-        let fdst_tag = format!("UTM_{}_V2_dst_FDST_ID-{}", stem, pid);
-        if !colliders.iter().any(|c| c.eq_ignore_ascii_case(&fdst_tag)) {
-            colliders.push(fdst_tag);
-        } else {
-            // If it exists, move it to the end to satisfy "last item" expectation.
-            colliders.retain(|c| !c.eq_ignore_ascii_case(&fdst_tag));
-            colliders.push(fdst_tag);
-        }
         zones.push(FullDstZoneInfo { part_id: pid, debris, colliders });
     }
 
