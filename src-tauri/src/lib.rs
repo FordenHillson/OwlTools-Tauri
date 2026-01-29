@@ -40,8 +40,24 @@ struct ScanLogPayload {
     total: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct MetaEntry { guid: String, path: String }
+
+#[derive(Serialize, Clone)]
+struct FullDstZoneInfo {
+    part_id: String,
+    debris: Vec<MetaEntry>,
+    colliders: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct FullDstScanResult {
+    base_guid: String,
+    base_path: String,
+    v2_guid: String,
+    v2_path: String,
+    zones: Vec<FullDstZoneInfo>,
+}
 
 #[tauri::command]
 async fn prefabdst_read_meta(xob_path: String) -> Result<MetaEntry, String> {
@@ -50,6 +66,120 @@ async fn prefabdst_read_meta(xob_path: String) -> Result<MetaEntry, String> {
         Ok((g, p)) => Ok(MetaEntry { guid: g, path: p }),
         Err(_) => Ok(MetaEntry { guid: String::new(), path: xob_path }),
     }
+}
+
+fn parse_geometry_param_names(v2_meta_text: &str) -> Vec<String> {
+    // Extract names from lines like:
+    //  GeometryParam UTM_Base_Ruin_base {
+    //  GeometryParam "UTM_House_..." {
+    let re = Regex::new(r#"(?m)^\s*GeometryParam\s+(?:\"([^\"]+)\"|([^\"\s\{]+))\s*\{"#).unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for cap in re.captures_iter(v2_meta_text) {
+        let name = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()).unwrap_or("");
+        let n = name.trim();
+        if !n.is_empty() {
+            out.push(n.to_string());
+        }
+    }
+    // Preserve order but remove duplicates
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut dedup: Vec<String> = Vec::new();
+    for n in out {
+        let key = n.to_lowercase();
+        if seen.insert(key) {
+            dedup.push(n);
+        }
+    }
+    dedup
+}
+
+fn geometry_param_belongs_to_part(name: &str, part_id: &str) -> bool {
+    let n = name.to_lowercase();
+    let p = part_id.to_lowercase();
+    if p.is_empty() { return false; }
+
+    // Include exact part tags commonly used by Arma prefabs
+    if n.contains(&format!("id-{}", p)) { return true; }
+    if n.contains(&format!("fdst_id-{}", p)) { return true; }
+    // VIS tags like: ..._VIS-A^B, ..._VIS-!A, ..._VIS-!A^!B
+    if n.contains(&format!("vis-{}", p)) { return true; }
+    if n.contains(&format!("vis-!{}", p)) { return true; }
+    false
+}
+
+#[tauri::command]
+async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    if !xob_abs.is_file() { return Err("Invalid xob path".into()); }
+
+    let (base_guid, base_path) = read_xob_object_field_from_meta(&xob_abs)?;
+
+    let stem = xob_abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Invalid xob file name".to_string())?;
+    let parent = xob_abs.parent().ok_or_else(|| "Invalid xob directory".to_string())?;
+
+    // sibling v2 model
+    let v2_xob = parent.join(format!("{}_V2_dst.xob", stem));
+    if !v2_xob.is_file() {
+        return Err("V2 dst file not found next to base xob".into());
+    }
+    let (v2_guid, v2_path) = read_xob_object_field_from_meta(&v2_xob)?;
+
+    // Parse GeometryParams from v2 meta
+    let v2_meta_path = PathBuf::from(format!("{}.meta", v2_xob.to_string_lossy()));
+    let v2_meta_text = fs::read_to_string(&v2_meta_path)
+        .map_err(|e| format!("Failed to read v2 .xob.meta: {}", e))?;
+    let geom_params = parse_geometry_param_names(&v2_meta_text);
+
+    // Scan debris from Dst folder
+    let mut debris_by_part: BTreeMap<String, Vec<(i32, MetaEntry)>> = BTreeMap::new();
+    if let Some(dst_dir) = find_dst_directory(&xob_abs) {
+        let rx = Regex::new(&format!(r"(?i)^{}_V2_dst_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$", regex::escape(stem))).unwrap();
+        if let Ok(rd) = fs::read_dir(&dst_dir) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if !p.is_file() { continue; }
+                let name = match p.file_name().and_then(|s| s.to_str()) { Some(s) => s, None => continue };
+                if let Some(c) = rx.captures(name) {
+                    let pid = c.name("p").map(|m| m.as_str()).unwrap_or("").to_string();
+                    let dn = c.name("d").map(|m| m.as_str()).unwrap_or("0").parse::<i32>().unwrap_or(0);
+                    let entry = match read_xob_object_field_from_meta(&p) {
+                        Ok((g, r)) => MetaEntry { guid: g, path: r },
+                        Err(_) => MetaEntry { guid: String::new(), path: rel_from_known_roots(&p) },
+                    };
+                    debris_by_part.entry(pid).or_default().push((dn, entry));
+                }
+            }
+        }
+    }
+
+    // Sort debris by dbr number and build zones list.
+    let mut zones: Vec<FullDstZoneInfo> = Vec::new();
+    for (pid, mut items) in debris_by_part {
+        items.sort_by_key(|(n, _)| *n);
+        let debris: Vec<MetaEntry> = items.into_iter().map(|(_, e)| e).collect();
+        let mut colliders: Vec<String> = geom_params
+            .iter()
+            .filter(|n| geometry_param_belongs_to_part(n, &pid))
+            .cloned()
+            .collect();
+
+        // Always append the per-part FDST collider tag derived from the base file name.
+        // Example: UTM_House_Village_E_1L01_V2_dst_FDST_ID-A
+        let fdst_tag = format!("UTM_{}_V2_dst_FDST_ID-{}", stem, pid);
+        if !colliders.iter().any(|c| c.eq_ignore_ascii_case(&fdst_tag)) {
+            colliders.push(fdst_tag);
+        } else {
+            // If it exists, move it to the end to satisfy "last item" expectation.
+            colliders.retain(|c| !c.eq_ignore_ascii_case(&fdst_tag));
+            colliders.push(fdst_tag);
+        }
+        zones.push(FullDstZoneInfo { part_id: pid, debris, colliders });
+    }
+
+    Ok(FullDstScanResult { base_guid, base_path, v2_guid, v2_path, zones })
 }
 
 fn extract_template_body(all_text: &str) -> String {
@@ -134,7 +264,7 @@ fn parse_preset_header(all_text: &str) -> PresetHeader {
 
 fn find_dst_directory(xob_abs: &Path) -> Option<PathBuf> {
     let parent = xob_abs.parent()?;
-    let mut exact = parent.join("dst");
+    let exact = parent.join("dst");
     if exact.is_dir() { return Some(exact); }
     // case-insensitive search among siblings
     if let Ok(rd) = fs::read_dir(parent) {
@@ -1286,6 +1416,13 @@ fn replace_gen_guid_markers(text: &str) -> String {
         .to_string()
 }
 
+fn replace_gen_vec3_markers(text: &str) -> String {
+    // The UI/build pipeline should not generate random vec3 values.
+    // Default to 0 0 0 for any {gen vec3} marker.
+    let re = Regex::new(r"\{\s*gen\s+vec3\s*\}").unwrap();
+    re.replace_all(text, "0 0 0").to_string()
+}
+
 fn find_fractalparts_bounds(text: &str) -> Option<(usize, usize, usize)> {
     // Returns (open_brace_idx, close_brace_idx, keyword_idx)
     let kw = text.find("FractalParts")?;
@@ -1371,7 +1508,81 @@ fn clone_fractalpart_block(block: &str, src_letter: char, new_letter: char) -> S
     out = re_guid
         .replace_all(&out, |_caps: &regex::Captures| format!("\"{{{}}}\"", gen_guid16()))
         .to_string();
+
+    // Also update template markers that encode the part letter.
+    // Example: {{DEBRIS_ID-A}} / {{COLLIDERS_ID-A}}
+    out = out.replace(
+        &format!("{{{{DEBRIS_ID-{}}}}}", src_letter),
+        &format!("{{{{DEBRIS_ID-{}}}}}", new_letter)
+    );
+    out = out.replace(
+        &format!("{{{{COLLIDERS_ID-{}}}}}", src_letter),
+        &format!("{{{{COLLIDERS_ID-{}}}}}", new_letter)
+    );
     out
+}
+
+fn build_debris_infos_block(items: &[MetaEntry], indent: &str) -> String {
+    // Build a list of SCR_DebrisInfo blocks.
+    // We don't currently have offsets/mass; use neutral defaults.
+    if items.is_empty() {
+        return format!("{}", "");
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for e in items {
+        let info_id = gen_guid16();
+        let ap_id = gen_guid16();
+        lines.push(format!("{}SCR_DebrisInfo \"{{{}}}\" {{", indent, info_id));
+        lines.push(format!("{} ModelPrefab \"{{{}}}{}\"", indent, e.guid, e.path));
+        lines.push(format!("{} LocalTransform AttachPoint \"{{{}}}\" {{", indent, ap_id));
+        lines.push(format!("{}  Offset 0 0 0", indent));
+        lines.push(format!("{}  Angles 0.00001 0 0", indent));
+        lines.push(format!("{} }}", indent));
+        lines.push(format!("{} m_fMass 500", indent));
+        lines.push(format!("{}}}", indent));
+    }
+    lines.join("\n")
+}
+
+fn build_colliders_line(tags: &[String]) -> String {
+    if tags.is_empty() {
+        return "\"\"".to_string();
+    }
+    tags.iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn replace_full_dst_markers(text: &str, scan: &FullDstScanResult) -> String {
+    // Replace {{DEBRIS_ID-X}} and {{COLLIDERS_ID-X}} markers.
+    let mut by_part: HashMap<String, (Vec<MetaEntry>, Vec<String>)> = HashMap::new();
+    for z in &scan.zones {
+        by_part.insert(z.part_id.clone(), (z.debris.clone(), z.colliders.clone()));
+    }
+
+    let re_debris = Regex::new(r"(?m)^(?P<indent>\s*)\{\{DEBRIS_ID-(?P<p>[A-Z])\}\}\s*$").unwrap();
+    let re_cols = Regex::new(r"(?m)^(?P<indent>\s*)\{\{COLLIDERS_ID-(?P<p>[A-Z])\}\}\s*$").unwrap();
+
+    let s = re_debris
+        .replace_all(text, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let pid = caps.name("p").map(|m| m.as_str()).unwrap_or("A");
+            let (debris, _cols) = by_part.get(pid).cloned().unwrap_or_default();
+            // Indent children one extra space relative to marker line.
+            let child_indent = format!("{} ", indent);
+            build_debris_infos_block(&debris, &child_indent)
+        })
+        .to_string();
+
+    re_cols
+        .replace_all(&s, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let pid = caps.name("p").map(|m| m.as_str()).unwrap_or("A");
+            let (_debris, cols) = by_part.get(pid).cloned().unwrap_or_default();
+            format!("{}{}", indent, build_colliders_line(&cols))
+        })
+        .to_string()
 }
 
 fn ensure_fractalparts_zone_count(text: &str, desired_count: usize) -> String {
@@ -1527,7 +1738,7 @@ async fn prefabdst_build(
         emit_prefabdst_log(&app, "info", format!("Generator: {}", if gen_key.is_empty() { "(unknown)" } else { &gen_key }), Some(cur), Some(total));
 
         emit_prefabdst_log(&app, "info", "Generating ET text...", Some(cur), Some(total));
-        let et_text = if gen_key == "template" {
+        let mut et_text = if gen_key == "template" {
             // scr_destructible template rendering (auto-scan dst)
             render_scr_destructible_template(&preset_text, &base_guid, &base_res, &xob_abs, scr_override.as_ref())
         } else {
@@ -1542,6 +1753,23 @@ async fn prefabdst_build(
                 hp_zone,
             )
         };
+
+        // For zone_fractal presets, fill debris/collider markers using a scan that matches the UI tree.
+        if gen_key != "template" {
+            if et_text.contains("{{DEBRIS_ID-") || et_text.contains("{{COLLIDERS_ID-") {
+                match prefabdst_scan_full_dst(xob_path.to_string()).await {
+                    Ok(scan) => {
+                        et_text = replace_full_dst_markers(&et_text, &scan);
+                    }
+                    Err(e) => {
+                        emit_prefabdst_log(&app, "warn", format!("Full DST scan failed (markers not replaced): {}", e), Some(cur), Some(total));
+                    }
+                }
+            }
+        }
+
+        // Always normalize any remaining {gen vec3} marker to 0 0 0.
+        et_text = replace_gen_vec3_markers(&et_text);
 
         let stem = xob_abs
             .file_stem()
@@ -3233,6 +3461,7 @@ pub fn run() {
             create_new_et_with_meta_from_xob,
             prefabdst_build,
             prefabdst_scan_dst,
+            prefabdst_scan_full_dst,
             prefabdst_read_meta,
             
         ])

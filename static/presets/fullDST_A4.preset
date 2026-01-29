@@ -25,47 +25,113 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
  }
  LastDestructionPhase SCR_DestructionPhase "{gen guid}" {
   Model "{guid from same name_v2_dst.xob.meta}path from same name_v2_dst.xob.meta"
+  UseMaterialsFromParent 1
+  DestroyOccluders 1
  }
  FractalParts {
-  FractalPartData "{6598B97E1323840B}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
-   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+  FractalPartData "{gen guid}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+   PartId "A"
+   BaseStats DestructibleBaseStats "{gen guid}" {
     MaxHealth 50
+   }
+   FirstDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseDestroyEffects {
+     SCR_ParticleEffect "{gen guid}" {
+      m_vOffsetPosition 0 0 0
+     }
+    }
+    PhaseShowIds {
+     "A"
+    }
+   }
+   LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseStartEffects {
+     SCR_AdvDebrisEffect "{gen guid}" {
+      m_DebrisInfos {
+       {{DEBRIS_ID-A}}
+      }
+      m_bUseMaterialFromParent 1
+     }
+    }
+   }
+   DestructionBoundingBoxes {
+    AABBBoundingVolume "{gen guid}" {
+     Mins 0 0 0
+     Maxs 0 0 0
+    }
+   }
+   Colliders {
+    {{COLLIDERS_ID-A}}
    }
   }
-  FractalPartData "{6598B97FEEC2642C}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+  FractalPartData "{gen guid}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
    PartId "B"
-   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+   BaseStats DestructibleBaseStats "{gen guid}" {
     MaxHealth 50
    }
-   FirstDestructionPhase FractalPartDestructionPhase "{6598B97728DE19E7}" {
+   FirstDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseDestroyEffects {
+     SCR_ParticleEffect "{gen guid}" {
+      m_vOffsetPosition 0 0 0
+     }
+    }
     PhaseShowIds {
      "B"
     }
    }
-   DamagePhases {
-    FractalPartDestructionPhase "{6598B97728DE19D6}" {
-     PhaseShowIds {
-      "B" "B1"
+   LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseStartEffects {
+     SCR_AdvDebrisEffect "{gen guid}" {
+      m_DebrisInfos {
+       {{DEBRIS_ID-B}}
+      }
+      m_bUseMaterialFromParent 1
      }
     }
    }
+   DestructionBoundingBoxes {
+    AABBBoundingVolume "{gen guid}" {
+     Mins 0 0 0
+     Maxs 0 0 0
+    }
+   }
+   Colliders {
+    {{COLLIDERS_ID-B}}
+   }
   }
-  FractalPartData "{6598B97FEFA6DA79}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
+  FractalPartData "{gen guid}" : "{62ADF6090B731EB1}Prefabs/Structures/Core/Destruction/FractalPart_Brick_Residential_Medium.conf" {
    PartId "C"
-   BaseStats DestructibleBaseStats "{6644AE0F0DF3D848}" {
+   BaseStats DestructibleBaseStats "{gen guid}" {
     MaxHealth 50
    }
-   FirstDestructionPhase FractalPartDestructionPhase "{6598B97728DE19E7}" {
+   FirstDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseDestroyEffects {
+     SCR_ParticleEffect "{gen guid}" {
+      m_vOffsetPosition 0 0 0
+     }
+    }
     PhaseShowIds {
      "C"
     }
    }
-   DamagePhases {
-    FractalPartDestructionPhase "{6598B97728DE19D6}" {
-     PhaseShowIds {
-      "C" "C1"
+   LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
+    PhaseStartEffects {
+     SCR_AdvDebrisEffect "{gen guid}" {
+      m_DebrisInfos {
+       {{DEBRIS_ID-C}}
+      }
+      m_bUseMaterialFromParent 1
      }
     }
+   }
+   DestructionBoundingBoxes {
+    AABBBoundingVolume "{gen guid}" {
+     Mins {gen vec3}
+     Maxs {gen vec3}
+    }
+   }
+   Colliders {
+    {{COLLIDERS_ID-C}}
    }
   }
  }

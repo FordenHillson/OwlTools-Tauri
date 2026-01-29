@@ -185,6 +185,27 @@
     }
   }
 
+  function loadFullFromCacheForActive() {
+    const f = activeModelFile;
+    if (!f) return;
+    const s = fullByFile[f];
+    if (s) {
+      fullBaseGuid = s.base_guid || '';
+      fullBasePath = s.base_path || '';
+      fullV2Guid = s.v2_guid || '';
+      fullV2Path = s.v2_path || '';
+      fullZones = Array.isArray(s.zones) ? s.zones : [];
+      fullSel = null;
+    } else {
+      fullBaseGuid = '';
+      fullBasePath = '';
+      fullV2Guid = '';
+      fullV2Path = '';
+      fullZones = [];
+      fullSel = null;
+    }
+  }
+
   const filteredPresets = $derived(presets.filter((p) => p.projectKey === projectKey));
   $effect(() => {
     if (!projectKey && projects.length) {
@@ -283,9 +304,22 @@
     }
   });
 
+  // Auto-scan full dst when preset is full_dst and a base file is present
+  $effect(() => {
+    const key = isFullDst && !!activeModelFile ? `${presetKey}|${activeModelFile}` : '';
+    if (key && lastFullScanKey !== key) {
+      lastFullScanKey = key;
+      scanFullDst();
+    }
+  });
+
   const selectedPreset = $derived(presets.find((p) => p.key === presetKey) || null);
   const isScrDestructible = $derived(
     !!selectedPreset && /scr_destructible/i.test(selectedPreset.file || selectedPreset.key || '') && (selectedPreset.generator || '').toLowerCase() === 'template'
+  );
+
+  const isFullDst = $derived(
+    !!selectedPreset && /fulldst|full_dst/i.test(selectedPreset.file || selectedPreset.key || '') && (selectedPreset.generator || '').toLowerCase() === 'zone_fractal'
   );
 
   type ScrDebris = { guid: string; path: string };
@@ -297,6 +331,24 @@
   let lastScrScanKey = $state<string>('');
   type ScrState = { base_guid: string; base_path: string; phases: ScrPhase[] };
   let scrByFile = $state<Record<string, ScrState>>({});
+
+  type FullDstDebris = { guid: string; path: string };
+  type FullDstZone = { part_id: string; debris: FullDstDebris[]; colliders: string[] };
+  type FullDstState = { base_guid: string; base_path: string; v2_guid: string; v2_path: string; zones: FullDstZone[] };
+  let fullByFile = $state<Record<string, FullDstState>>({});
+  let fullBaseGuid = $state<string>('');
+  let fullBasePath = $state<string>('');
+  let fullV2Guid = $state<string>('');
+  let fullV2Path = $state<string>('');
+  let fullZones = $state<FullDstZone[]>([]);
+  let fullSel:
+    | { kind: 'base' }
+    | { kind: 'v2' }
+    | { kind: 'zone'; part_id: string }
+    | { kind: 'debris'; part_id: string; idx: number }
+    | { kind: 'collider'; part_id: string; idx: number }
+    | null = $state(null);
+  let lastFullScanKey = $state<string>('');
 
   let filesDropEl: HTMLElement | null = null;
   let filesIsDragOver = $state<boolean>(false);
@@ -356,6 +408,15 @@
     scrByFile = { ...scrByFile, [f]: { base_guid: scrBaseGuid, base_path: scrBasePath, phases: scrPhases } };
   }
 
+  function persistFullForActive() {
+    const f = activeModelFile;
+    if (!f) return;
+    fullByFile = {
+      ...fullByFile,
+      [f]: { base_guid: fullBaseGuid, base_path: fullBasePath, v2_guid: fullV2Guid, v2_path: fullV2Path, zones: fullZones }
+    };
+  }
+
   async function scanDst() {
     if (!activeModelFile) {
       pushLog('WARN', 'Pick a base .xob first.');
@@ -375,6 +436,30 @@
     } catch (e: any) {
       console.error(e);
       pushLog('ERROR', String(e?.toString?.() || e || 'Scan dst failed'));
+    }
+  }
+
+  async function scanFullDst() {
+    if (!activeModelFile) {
+      pushLog('WARN', 'Pick a base .xob first.');
+      return;
+    }
+    try {
+      const res = await invoke<FullDstState>('prefabdst_scan_full_dst', {
+        xobPath: activeModelFile
+      });
+      const r: any = res as any;
+      fullBaseGuid = String(r.base_guid || '');
+      fullBasePath = String(r.base_path || '');
+      fullV2Guid = String(r.v2_guid || '');
+      fullV2Path = String(r.v2_path || '');
+      fullZones = Array.isArray(r.zones) ? (r.zones as FullDstZone[]) : [];
+      fullSel = null;
+      persistFullForActive();
+      pushLog('INFO', `Scan full dst done. Found ${fullZones.length} zone(s).`);
+    } catch (e: any) {
+      console.error(e);
+      pushLog('ERROR', String(e?.toString?.() || e || 'Scan full dst failed'));
     }
   }
 
@@ -535,19 +620,29 @@
     modelFiles = modelFiles.filter((x) => x !== p);
     // drop cached state
     const cache = { ...scrByFile }; delete cache[p]; scrByFile = cache;
+    const cacheFull = { ...fullByFile }; delete cacheFull[p]; fullByFile = cacheFull;
     if (activeModelIndex >= modelFiles.length) activeModelIndex = Math.max(0, modelFiles.length - 1);
     loadScrFromCacheForActive();
+    loadFullFromCacheForActive();
   }
 
   function clearModelFiles() {
     modelFiles = [];
     saveFolder = '';
     lastScrScanKey = '';
+    lastFullScanKey = '';
     scrBaseGuid = '';
     scrBasePath = '';
     scrPhases = [];
     scrSel = null;
     scrByFile = {};
+    fullBaseGuid = '';
+    fullBasePath = '';
+    fullV2Guid = '';
+    fullV2Path = '';
+    fullZones = [];
+    fullSel = null;
+    fullByFile = {};
     activeModelIndex = 0;
     pushLog('INFO', 'Cleared file list.');
   }
@@ -702,8 +797,8 @@
                   role="button"
                   tabindex="0"
                   aria-pressed={i===activeModelIndex}
-                  onclick={() => { activeModelIndex = i; loadScrFromCacheForActive(); lastScrScanKey=''; }}
-                  onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); activeModelIndex = i; loadScrFromCacheForActive(); lastScrScanKey=''; } }}
+                  onclick={() => { activeModelIndex = i; loadScrFromCacheForActive(); loadFullFromCacheForActive(); lastScrScanKey=''; lastFullScanKey=''; }}
+                  onkeydown={(e) => { if (e.key==='Enter' || e.key===' ') { e.preventDefault(); activeModelIndex = i; loadScrFromCacheForActive(); loadFullFromCacheForActive(); lastScrScanKey=''; lastFullScanKey=''; } }}
                 >
                   <span class="chip-name">{f.split('\\').pop()}</span>
                   <button class="chip-x" type="button" onclick={(e) => { e.stopPropagation(); removeModelFile(f); }} aria-label="Remove">×</button>
@@ -742,6 +837,89 @@
         <label for="prefabdst-hpzone">HP Zone:</label>
         <input id="prefabdst-hpzone" type="number" min="1" max="9999" step="1" bind:value={hpZone} oninput={() => (hpZone = clampInt(hpZone, 1, 9999))} disabled={isBuilding} />
       </div>
+    </div>
+  {/if}
+
+  {#if isFullDst}
+    <div class="section-title">tree (full_dst)</div>
+    <div class="scr-controls">
+      <div class="left">
+        <label><input type="checkbox" checked disabled /> Scan from base xob + sibling *_V2_dst.xob.meta + Dst/ debris</label>
+      </div>
+      <div class="right">
+        <button class="btn" type="button" onclick={scanFullDst} disabled={isBuilding || modelFiles.length === 0}>Scan full dst</button>
+      </div>
+    </div>
+
+    <div class="scr-tree" role="tree">
+      <div class="tree-row header" aria-hidden="true">
+        <div class="col name"><strong>item</strong></div>
+        <div class="col path"><strong>value</strong></div>
+      </div>
+      <div
+        class="tree-row {fullSel && fullSel.kind==='base' ? 'sel' : ''}"
+        role="treeitem"
+        tabindex="0"
+        aria-selected={!!(fullSel && fullSel.kind==='base')}
+        onclick={() => (fullSel = { kind: 'base' })}
+        onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'base' }; } }}
+      >
+        <div class="col name">Building {fullBaseGuid ? `{${fullBaseGuid}}` : '{ }'}</div>
+        <div class="col path">{fullBasePath || '(not found)'}</div>
+      </div>
+      <div
+        class="tree-row {fullSel && fullSel.kind==='v2' ? 'sel' : ''}"
+        role="treeitem"
+        tabindex="0"
+        aria-selected={!!(fullSel && fullSel.kind==='v2')}
+        onclick={() => (fullSel = { kind: 'v2' })}
+        onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'v2' }; } }}
+      >
+        <div class="col name">Building ruin (v2_dst) {fullV2Guid ? `{${fullV2Guid}}` : '{ }'}</div>
+        <div class="col path">{fullV2Path || '(not found)'}</div>
+      </div>
+
+      {#each fullZones as z (z.part_id)}
+        <div
+          class="tree-row {fullSel && fullSel.kind==='zone' && fullSel.part_id===z.part_id ? 'sel' : ''}"
+          role="treeitem"
+          tabindex="0"
+          aria-selected={!!(fullSel && fullSel.kind==='zone' && fullSel.part_id===z.part_id)}
+          onclick={() => (fullSel = { kind: 'zone', part_id: z.part_id })}
+          onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'zone', part_id: z.part_id }; } }}
+        >
+          <div class="col name">Zone {z.part_id}</div>
+          <div class="col path">debris: {z.debris.length}, collider: {z.colliders.length}</div>
+        </div>
+
+        {#each z.debris as db, i (`${z.part_id}-d-${i}`)}
+          <div
+            class="tree-row debris {fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i ? 'sel' : ''}"
+            role="treeitem"
+            tabindex="0"
+            aria-selected={!!(fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i)}
+            onclick={() => (fullSel = { kind: 'debris', part_id: z.part_id, idx: i })}
+            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'debris', part_id: z.part_id, idx: i }; } }}
+          >
+            <div class="col name">debris dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
+            <div class="col path">{db.path}</div>
+          </div>
+        {/each}
+
+        {#each z.colliders as c, j (`${z.part_id}-c-${j}`)}
+          <div
+            class="tree-row debris {fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j ? 'sel' : ''}"
+            role="treeitem"
+            tabindex="0"
+            aria-selected={!!(fullSel && fullSel.kind==='collider' && fullSel.part_id===z.part_id && fullSel.idx===j)}
+            onclick={() => (fullSel = { kind: 'collider', part_id: z.part_id, idx: j })}
+            onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'collider', part_id: z.part_id, idx: j }; } }}
+          >
+            <div class="col name">collider {j + 1}</div>
+            <div class="col path">{c}</div>
+          </div>
+        {/each}
+      {/each}
     </div>
   {/if}
 

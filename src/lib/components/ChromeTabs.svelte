@@ -5,6 +5,7 @@
   import PrefabDST from '$lib/modules/PrefabDST.svelte';
   import SocketManager from '$lib/modules/SocketManager.svelte';
   import Updater from '$lib/modules/Updater.svelte';
+  import Validate from '$lib/modules/Validate.svelte';
   import { theme, toggleTheme } from '$lib/stores/theme';
   let container: HTMLDivElement;
   let tabs: any;
@@ -115,7 +116,7 @@
     if (!key) return;
     const current = activeModel;
     if (!current) return;
-    const title = key === 'fulldst' ? 'Full DST View' : key === 'prefabdst' ? 'Build Prefab DST' : key === 'socket' ? 'Socket Manager' : key === 'updater' ? 'Updater' : key;
+    const title = key === 'fulldst' ? 'Full DST View' : key === 'prefabdst' ? 'Build Prefab DST' : key === 'socket' ? 'Socket Manager' : key === 'updater' ? 'Updater' : key === 'validate' ? 'Validate' : key;
     const updated = tabModels.map(t => t.id === current.id ? { ...t, type: key, title } : t);
     tabModels = updated;
     if (tabs && tabs.activeTabEl) {
@@ -180,6 +181,8 @@
           <SocketManager />
         {:else if t.type === 'updater'}
           <Updater />
+        {:else if t.type === 'validate'}
+          <Validate />
         {:else}
           <div class="placeholder">{t.title || 'Loading...'}</div>
         {/if}

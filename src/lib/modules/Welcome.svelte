@@ -161,7 +161,8 @@
   const shortcuts: Array<{ key: string; label: string; glyph?: string; iconSrc?: string }> = [
     { key: 'fulldst', label: 'Full DST View', iconSrc: '/FullDST.svg' },
     { key: 'prefabdst', label: 'Build Prefab DST', iconSrc: '/war.png' },
-    { key: 'socket', label: 'Socket Manager', iconSrc: '/Socket_Manager.svg' }
+    { key: 'socket', label: 'Socket Manager', iconSrc: '/Socket_Manager.svg' },
+    { key: 'validate', label: 'Validate', glyph: '✓' }
   ];
 
   const updaterShortcut: { key: string; label: string; glyph?: string; iconSrc?: string } = {
