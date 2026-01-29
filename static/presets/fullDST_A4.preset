@@ -21,7 +21,7 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
  }
  coords -16.236 -8.701 68.15
  BaseStats DestructibleBaseStats "{6644C3D95FBFC931}" {
-  MaxHealth 10
+  MaxHealth 100
  }
  LastDestructionPhase SCR_DestructionPhase "{gen guid}" {
   Model "{guid from same name_v2_dst.xob.meta}path from same name_v2_dst.xob.meta"
