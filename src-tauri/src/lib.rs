@@ -2460,7 +2460,11 @@ fn remember_ebt_addons_dir(path: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn mqa_report_from_xob(xob_path: String, workbench_port: Option<u16>) -> Result<JsonValue, String> {
+fn mqa_report_from_xob(
+    xob_path: String,
+    workbench_port: Option<u16>,
+    asset_type: Option<String>,
+) -> Result<JsonValue, String> {
     let xob_abs = PathBuf::from(&xob_path);
     if !xob_abs.is_file() {
         return Err("Invalid xob path".into());
@@ -2490,6 +2494,15 @@ fn mqa_report_from_xob(xob_path: String, workbench_port: Option<u16>) -> Result<
         .ok_or_else(|| "EBT addons directory not configured".to_string())?;
 
     let wb_port: u16 = workbench_port.unwrap_or(5700);
+
+    let asset_type_norm = asset_type
+        .unwrap_or_else(|| "GENERIC".to_string())
+        .trim()
+        .to_uppercase();
+    let asset_type_norm = match asset_type_norm.as_str() {
+        "GENERIC" | "BUILDINGS" | "VEHICLES" | "WEAPONS" => asset_type_norm,
+        _ => "GENERIC".to_string(),
+    };
 
     let py = format!(
         r#"import sys, pathlib, json
@@ -2557,7 +2570,7 @@ debug['mqa_operator_exists'] = op_exists
 
 if op_exists:
     try:
-        bpy.ops.ebt.mqa_report_conventions(asset_type='GENERIC')
+        bpy.ops.ebt.mqa_report_conventions(asset_type=r'''{}''')
         debug['mqa_operator_ran'] = True
     except Exception as e:
         debug['mqa_operator_ran'] = False
@@ -2595,6 +2608,7 @@ print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
         addons_dir.to_string_lossy(),
         wb_port,
         fbx_abs.to_string_lossy()
+        , asset_type_norm
     );
 
     let out = std::process::Command::new(blender)
