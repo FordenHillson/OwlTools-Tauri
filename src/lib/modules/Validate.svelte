@@ -17,7 +17,7 @@
   let unlistenFileDrop: (() => void) | null = null;
   let unlistenWebviewDrop: (() => void) | null = null;
 
-  type ValidationTab = 'file' | 'config' | 'results';
+  type ValidationTab = 'file' | 'config';
   let activeTab: ValidationTab = 'file';
   let assetType: 'Generic' | 'Building' = 'Generic';
   let saveLogPath = '';
@@ -29,11 +29,121 @@
   let workbenchPort = 5700;
   let showMqaPopup = false;
   let mqaReport: any = null;
+  let mqaCategoryFilter = 'All';
+  let mqaMessageFilter = 'All';
+  let lastMqaCategoryFilter = mqaCategoryFilter;
+  let isMqaRunning = false;
+  let mqaLoadingStatus = '';
+  let mqaLoadingStartedAt = 0;
+  let mqaLoadingElapsedSec = 0;
+  let mqaLoadingTimer: any = null;
+  let mqaCopiedKey: string | null = null;
+  let mqaCopiedTimer: any = null;
+
+  let configLoaded = false;
+  $: isConfigReady = !!(blenderPath && ebtAddonsDir);
+  $: isValidateLocked = configLoaded && !isConfigReady;
+
+  const normalizeMqaMessage = (msg: string) => {
+    let t = String(msg ?? '').trim();
+    if (!t) return 'Unknown';
+    t = t.replace(/LOD\d+/gi, 'LOD*');
+    t = t.replace(/'LOD\*'/g, "'LOD*'");
+    t = t.replace(/\b(uv\s*channel|channel|layer)\s*\d+\b/gi, '$1 *');
+    t = t.replace(/\b(material|mat|texture|tex)\s*[_-]?\s*\d+\b/gi, '$1_*');
+    t = t.replace(/_\d+\b/g, '_*');
+    t = t.replace(/\b\d{2,}\b/g, '*');
+    return t;
+  };
+
+  async function copyMqaItem(item: any, key: string) {
+    const cat = String(item?.category ?? '').trim();
+    const msg = String(item?.message ?? '').trim();
+    const cnt = Number(item?.count ?? 0);
+    const objs = Array.isArray(item?.objects) ? item.objects : [];
+    const lines: string[] = [];
+    lines.push(`[${cat}]`);
+    lines.push(msg);
+    lines.push(`[${Number.isFinite(cnt) ? cnt : objs.length}]`);
+    if (objs.length) {
+      for (const o of objs) {
+        const t = String(o ?? '').trim();
+        if (t) lines.push(`- ${t}`);
+      }
+    }
+    const text = lines.join('\n');
+
+    try {
+      await navigator.clipboard.writeText(text);
+      mqaCopiedKey = key;
+      if (mqaCopiedTimer) clearTimeout(mqaCopiedTimer);
+      mqaCopiedTimer = setTimeout(() => {
+        mqaCopiedKey = null;
+        mqaCopiedTimer = null;
+      }, 1200);
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.top = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        mqaCopiedKey = key;
+        if (mqaCopiedTimer) clearTimeout(mqaCopiedTimer);
+        mqaCopiedTimer = setTimeout(() => {
+          mqaCopiedKey = null;
+          mqaCopiedTimer = null;
+        }, 1200);
+      } catch {}
+    }
+  }
+
+  $: mqaItems = Array.isArray(mqaReport?.items) ? mqaReport.items : [];
+  $: mqaCategoryCounts = (() => {
+    const m = new Map<string, number>();
+    for (const it of mqaItems) {
+      const cat = String(it?.category ?? '').trim() || 'Unknown';
+      m.set(cat, (m.get(cat) ?? 0) + 1);
+    }
+    return Array.from(m.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([category, count]) => ({ category, count }));
+  })();
+  $: mqaItemsByCategory = mqaCategoryFilter === 'All'
+    ? mqaItems
+    : mqaItems.filter((it: any) => (String(it?.category ?? '').trim() || 'Unknown') === mqaCategoryFilter);
+
+  $: mqaMessageCounts = (() => {
+    const m = new Map<string, { label: string; count: number; example: string }>();
+    for (const it of mqaItemsByCategory) {
+      const raw = String(it?.message ?? '').trim() || 'Unknown';
+      const key = normalizeMqaMessage(raw);
+      const cur = m.get(key);
+      if (cur) {
+        cur.count += 1;
+      } else {
+        m.set(key, { label: key, count: 1, example: raw });
+      }
+    }
+    return Array.from(m.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([messageKey, v]) => ({ messageKey, label: v.label, count: v.count, example: v.example }));
+  })();
+
+  $: mqaFilteredItems = mqaMessageFilter === 'All'
+    ? mqaItemsByCategory
+    : mqaItemsByCategory.filter(
+        (it: any) => normalizeMqaMessage(String(it?.message ?? '').trim() || 'Unknown') === mqaMessageFilter
+      );
 
   const tabs: { id: ValidationTab; label: string; icon: string }[] = [
     { id: 'file', label: 'Validate asset', icon: '📄' },
-    { id: 'config', label: 'Config', icon: '⚙️' },
-    { id: 'results', label: 'Results', icon: '✓' }
+    { id: 'config', label: 'Config', icon: '⚙️' }
   ];
 
   const assetTypes = ['Generic', 'Building'] as const;
@@ -45,13 +155,12 @@
       if (bp && typeof bp === 'string') {
         blenderPath = bp;
       }
-      const ebt = (s?.ebtAddonsDir ?? s?.ebt_addons_dir) as any;
-      if (ebt && typeof ebt === 'string') {
-        ebtAddonsDir = ebt;
+      const ad = (s?.ebtAddonsDir ?? s?.ebt_addons_dir) as any;
+      if (ad && typeof ad === 'string') {
+        ebtAddonsDir = ad;
       }
-    } catch (err) {
-      console.error('Failed to load autosocket settings', err);
-    }
+    } catch {}
+    configLoaded = true;
   }
 
   function loadWorkbenchPort() {
@@ -71,6 +180,9 @@
   }
 
   async function handleCheckAll() {
+    if (isMqaRunning) {
+      return;
+    }
     checkAllMessage = '';
     if (!selectedFilePath) {
       checkAllMessage = 'Please select .xob file first';
@@ -81,13 +193,51 @@
       return;
     }
     try {
-      const res = await invoke<any>('mqa_report_from_xob', { xobPath: selectedFilePath, workbenchPort });
+      isMqaRunning = true;
+      checkAllMessage = 'Running MQA...';
+      mqaLoadingStatus = 'Launching Blender...';
+      mqaLoadingStartedAt = Date.now();
+      mqaLoadingElapsedSec = 0;
+      if (mqaLoadingTimer) {
+        clearInterval(mqaLoadingTimer);
+      }
+      mqaLoadingTimer = setInterval(() => {
+        if (!mqaLoadingStartedAt) return;
+        mqaLoadingElapsedSec = Math.floor((Date.now() - mqaLoadingStartedAt) / 1000);
+        if (mqaLoadingElapsedSec >= 1) {
+          mqaLoadingStatus = `Waiting for Blender... (${mqaLoadingElapsedSec}s)`;
+        }
+      }, 500);
+
+      const mqaAssetType = assetType === 'Building' ? 'BUILDINGS' : 'GENERIC';
+      const res = await invoke<any>('mqa_report_from_xob', {
+        xobPath: selectedFilePath,
+        workbenchPort,
+        assetType: mqaAssetType
+      });
+
+      mqaLoadingStatus = 'Processing report...';
       mqaReport = res;
+      mqaCategoryFilter = 'All';
+      mqaMessageFilter = 'All';
       showMqaPopup = true;
       checkAllMessage = 'MQA report generated';
     } catch (err: any) {
       checkAllMessage = String(err?.message || err || 'Failed to open Blender');
+      mqaLoadingStatus = 'Failed';
+    } finally {
+      isMqaRunning = false;
+      mqaLoadingStartedAt = 0;
+      if (mqaLoadingTimer) {
+        clearInterval(mqaLoadingTimer);
+        mqaLoadingTimer = null;
+      }
     }
+  }
+
+  $: if (mqaCategoryFilter !== lastMqaCategoryFilter) {
+    lastMqaCategoryFilter = mqaCategoryFilter;
+    mqaMessageFilter = 'All';
   }
 
   function closeMqaPopup() {
@@ -96,14 +246,14 @@
 
   function handleBackdropClick(e: MouseEvent) {
     if (e.target === e.currentTarget) {
-      closeMqaPopup();
+      e.preventDefault();
+      e.stopPropagation();
     }
   }
 
   function handleBackdropKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      closeMqaPopup();
     }
   }
 
@@ -183,6 +333,9 @@
   }
 
   function switchTab(tab: ValidationTab) {
+    if (isValidateLocked && tab !== 'config') {
+      return;
+    }
     activeTab = tab;
   }
 
@@ -440,6 +593,10 @@
     loadAutosocketSettings();
   });
 
+  $: if ((activeTab as any) === 'results') {
+    activeTab = 'file';
+  }
+
   onDestroy(() => {
     try {
       window.dispatchEvent(new CustomEvent('app:set-allow-drop', { detail: false }));
@@ -453,6 +610,10 @@
     unlistenWebviewDrop?.();
     unlistenWebviewDrop = null;
   });
+
+  $: if (isValidateLocked && activeTab !== 'config') {
+    activeTab = 'config';
+  }
 </script>
 
 <div class="validate-container">
@@ -460,9 +621,13 @@
     <h2>Validate</h2>
     <div class="tab-bar">
       {#each tabs as tab (tab.id)}
+        {@const disabledTab = isValidateLocked && tab.id !== 'config'}
         <button
           class="tab-btn"
           class:active={activeTab === tab.id}
+          class:disabled={disabledTab}
+          disabled={disabledTab}
+          aria-disabled={disabledTab}
           on:click={() => switchTab(tab.id)}
         >
           <span class="tab-icon">{tab.icon}</span>
@@ -554,9 +719,13 @@
             </div>
           </div>
 
-          <button class="btn btn-check-all" on:click={handleCheckAll}>
-            <span class="check-all-icon">✓</span>
-            Check All
+          <button class="btn btn-check-all" on:click={handleCheckAll} disabled={isMqaRunning}>
+            {#if isMqaRunning}
+              <span class="spinner" aria-hidden="true"></span>
+            {:else}
+              <span class="check-all-icon">✓</span>
+            {/if}
+            {isMqaRunning ? 'Running...' : 'Check All'}
           </button>
           {#if checkAllMessage}
             <div class="check-all-message">{checkAllMessage}</div>
@@ -605,15 +774,6 @@
           </div>
         </div>
       </div>
-    {:else if activeTab === 'results'}
-      <div class="tab-content">
-        <div class="placeholder-section">
-          <div class="placeholder-icon">✓</div>
-          <h3>Validation Results</h3>
-          <p>Results will appear here after validation is complete.</p>
-          <div class="placeholder-hint">Select a file and validate to see results</div>
-        </div>
-      </div>
     {/if}
   </div>
 </div>
@@ -639,10 +799,65 @@
         </div>
       </div>
       <div class="modal-body">
-        {#if Array.isArray(mqaReport?.items) && mqaReport.items.length}
+        {#if mqaItems.length}
+          <div class="mqa-filters">
+            <button
+              type="button"
+              class="mqa-filter {mqaCategoryFilter === 'All' ? 'active' : ''}"
+              on:click={() => {
+                mqaCategoryFilter = 'All';
+                mqaMessageFilter = 'All';
+              }}
+            >
+              All <span class="mqa-filter-count">{mqaItems.length}</span>
+            </button>
+            {#each mqaCategoryCounts as c (c.category)}
+              <button
+                type="button"
+                class="mqa-filter {mqaCategoryFilter === c.category ? 'active' : ''}"
+                on:click={() => {
+                  mqaCategoryFilter = c.category;
+                  mqaMessageFilter = 'All';
+                }}
+              >
+                {c.category} <span class="mqa-filter-count">{c.count}</span>
+              </button>
+            {/each}
+          </div>
+
+          {#if mqaMessageCounts.length > 1}
+            <div class="mqa-subfilters">
+              <button
+                type="button"
+                class="mqa-filter mqa-filter--sub {mqaMessageFilter === 'All' ? 'active' : ''}"
+                on:click={() => (mqaMessageFilter = 'All')}
+              >
+                All <span class="mqa-filter-count">{mqaItemsByCategory.length}</span>
+              </button>
+              {#each mqaMessageCounts as s (s.messageKey)}
+                <button
+                  type="button"
+                  class="mqa-filter mqa-filter--sub {mqaMessageFilter === s.messageKey ? 'active' : ''}"
+                  on:click={() => (mqaMessageFilter = s.messageKey)}
+                  title={s.example}
+                >
+                  <span class="mqa-filter-label">{s.label}</span>
+                  <span class="mqa-filter-count">{s.count}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
           <div class="mqa-list">
-            {#each mqaReport.items as item, idx (idx)}
+            {#each mqaFilteredItems as item, idx (idx)}
               <div class="mqa-item">
+                <button
+                  type="button"
+                  class="mqa-copy"
+                  on:click={() => copyMqaItem(item, String(idx))}
+                  title="Copy"
+                >
+                  {mqaCopiedKey === String(idx) ? 'Copied' : 'Copy'}
+                </button>
                 <div class="mqa-line">
                   <span class="mqa-cat">[{item?.category ?? ''}]</span>
                   <span class="mqa-msg">{item?.message ?? ''}</span>
@@ -679,6 +894,15 @@
           {/if}
         {/if}
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if isMqaRunning}
+  <div class="mqa-loading-backdrop" aria-hidden="true">
+    <div class="mqa-loading-card">
+      <img class="mqa-loading-img" src="/Owl_MQA_1.png" alt="MQA" />
+      <div class="mqa-loading-text">{mqaLoadingStatus || 'Running MQA...'}</div>
     </div>
   </div>
 {/if}
@@ -720,9 +944,12 @@
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 120ms ease;
-    white-space: nowrap;
+    border: none;
+  }
+
+  .tab-btn.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   .tab-btn:hover {
@@ -959,8 +1186,8 @@
   .drop-zone {
     border: 2px dashed rgba(255, 255, 255, 0.3);
     border-radius: 8px;
-    padding: 20px;
-    min-height: 140px;
+    padding: 12px;
+    min-height: 58px;
     text-align: center;
     transition: all 200ms ease;
     cursor: pointer;
@@ -975,6 +1202,74 @@
   .drop-zone.drag-over {
     border-color: #1f73e6;
     background: rgba(31, 115, 230, 0.1);
+  }
+
+  .spinner {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: rgba(255, 255, 255, 0.9);
+    animation: spin 900ms linear infinite;
+    display: inline-block;
+  }
+
+  :global(body.theme-light) .spinner {
+    border-color: rgba(17, 17, 17, 0.2);
+    border-top-color: rgba(17, 17, 17, 0.8);
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .mqa-loading-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1100;
+    padding: 16px;
+  }
+
+  .mqa-loading-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 18px 18px 14px;
+    border-radius: 12px;
+    background: rgba(30, 30, 30, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  }
+
+  .mqa-loading-img {
+    width: min(360px, 70vw);
+    height: auto;
+    display: block;
+  }
+
+  .mqa-loading-text {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  :global(body.theme-light) .mqa-loading-card {
+    background: rgba(255, 255, 255, 0.98);
+    border-color: rgba(17, 17, 17, 0.12);
+  }
+
+  :global(body.theme-light) .mqa-loading-text {
+    color: rgba(17, 17, 17, 0.7);
   }
 
   :global(body.theme-light) .drop-zone {
@@ -1201,6 +1496,55 @@
     overflow: auto;
   }
 
+  .mqa-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .mqa-subfilters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .mqa-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .mqa-filter--sub {
+    max-width: 100%;
+  }
+
+  .mqa-filter-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 360px;
+    display: inline-block;
+  }
+
+  .mqa-filter.active {
+    border-color: rgba(120, 170, 255, 0.55);
+    background: rgba(80, 130, 255, 0.16);
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .mqa-filter-count {
+    opacity: 0.75;
+  }
+
   .modal-empty {
     font-size: 12px;
     color: rgba(255, 255, 255, 0.65);
@@ -1253,10 +1597,30 @@
   }
 
   .mqa-item {
+    position: relative;
     padding: 10px;
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .mqa-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .mqa-copy:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.85);
   }
 
   .mqa-line {
@@ -1325,6 +1689,18 @@
     color: rgba(17, 17, 17, 0.65);
   }
 
+  :global(body.theme-light) .mqa-filter {
+    border-color: rgba(17, 17, 17, 0.12);
+    background: rgba(17, 17, 17, 0.04);
+    color: rgba(17, 17, 17, 0.72);
+  }
+
+  :global(body.theme-light) .mqa-filter.active {
+    border-color: rgba(35, 90, 190, 0.45);
+    background: rgba(35, 90, 190, 0.12);
+    color: rgba(17, 17, 17, 0.9);
+  }
+
   :global(body.theme-light) .mqa-cat {
     color: rgba(17, 17, 17, 0.85);
   }
@@ -1332,6 +1708,18 @@
   :global(body.theme-light) .mqa-item {
     background: rgba(17, 17, 17, 0.04);
     border-color: rgba(17, 17, 17, 0.08);
+  }
+
+  :global(body.theme-light) .mqa-copy {
+    border-color: rgba(17, 17, 17, 0.12);
+    background: rgba(17, 17, 17, 0.03);
+    color: rgba(17, 17, 17, 0.72);
+  }
+
+  :global(body.theme-light) .mqa-copy:hover {
+    border-color: rgba(17, 17, 17, 0.2);
+    background: rgba(17, 17, 17, 0.06);
+    color: rgba(17, 17, 17, 0.9);
   }
 
   .tab-content {
@@ -1418,53 +1806,5 @@
     to {
       opacity: 1;
     }
-  }
-
-  .placeholder-section {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    padding: 48px 24px;
-    text-align: center;
-    min-height: 300px;
-  }
-
-  .placeholder-icon {
-    font-size: 64px;
-    opacity: 0.3;
-  }
-
-  .placeholder-section h3 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
-  }
-
-  .placeholder-section p {
-    margin: 0;
-    font-size: 14px;
-    color: rgba(255, 255, 255, 0.6);
-    max-width: 300px;
-  }
-
-  .placeholder-hint {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.4);
-    font-style: italic;
-  }
-
-  :global(body.theme-light) .placeholder-section h3 {
-    color: rgba(17, 17, 17, 0.9);
-  }
-
-  :global(body.theme-light) .placeholder-section p {
-    color: rgba(17, 17, 17, 0.6);
-  }
-
-  :global(body.theme-light) .placeholder-hint {
-    color: rgba(17, 17, 17, 0.4);
   }
 </style>
