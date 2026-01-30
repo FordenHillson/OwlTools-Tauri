@@ -29,7 +29,6 @@
   let workbenchPort = 5700;
   let showMqaPopup = false;
   let mqaReport: any = null;
-  let checkAllRunning = false;
 
   const tabs: { id: ValidationTab; label: string; icon: string }[] = [
     { id: 'file', label: 'Validate asset', icon: '📄' },
@@ -81,20 +80,13 @@
       checkAllMessage = 'Selected file must be .xob';
       return;
     }
-    if (checkAllRunning) return;
-    checkAllRunning = true;
     try {
-      checkAllMessage = 'Opening Blender...';
-      invoke('open_fbx_in_blender', { xobPath: selectedFilePath, workbenchPort }).catch(() => {});
-      checkAllMessage = 'Generating MQA report...';
       const res = await invoke<any>('mqa_report_from_xob', { xobPath: selectedFilePath, workbenchPort });
       mqaReport = res;
       showMqaPopup = true;
       checkAllMessage = 'MQA report generated';
     } catch (err: any) {
       checkAllMessage = String(err?.message || err || 'Failed to open Blender');
-    } finally {
-      checkAllRunning = false;
     }
   }
 
@@ -562,7 +554,7 @@
             </div>
           </div>
 
-          <button class="btn btn-check-all" on:click={handleCheckAll} disabled={checkAllRunning}>
+          <button class="btn btn-check-all" on:click={handleCheckAll}>
             <span class="check-all-icon">✓</span>
             Check All
           </button>
@@ -669,7 +661,22 @@
             {/each}
           </div>
         {:else}
-          <div class="modal-empty">No reports to display.</div>
+          {#if Array.isArray(mqaReport?.errors) && mqaReport.errors.length}
+            <div class="modal-empty">No reports to display.</div>
+            <div class="mqa-errors">
+              {#each mqaReport.errors as errLine, ei (ei)}
+                <div class="mqa-err">{errLine}</div>
+              {/each}
+            </div>
+          {:else}
+            <div class="modal-empty">No reports to display.</div>
+          {/if}
+          {#if mqaReport?.debug}
+            <div class="mqa-debug">
+              <div class="mqa-debug-title">Debug</div>
+              <pre class="mqa-debug-pre">{JSON.stringify(mqaReport.debug, null, 2)}</pre>
+            </div>
+          {/if}
         {/if}
       </div>
     </div>
@@ -1199,6 +1206,46 @@
     color: rgba(255, 255, 255, 0.65);
   }
 
+  .mqa-errors {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(255, 70, 70, 0.08);
+    border: 1px solid rgba(255, 70, 70, 0.22);
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .mqa-err {
+    padding: 2px 0;
+  }
+
+  .mqa-debug {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .mqa-debug-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.78);
+    margin-bottom: 6px;
+  }
+
+  .mqa-debug-pre {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.65);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   .mqa-list {
     display: flex;
     flex-direction: column;
@@ -1261,6 +1308,20 @@
   :global(body.theme-light) .mqa-msg,
   :global(body.theme-light) .mqa-count,
   :global(body.theme-light) .mqa-objects {
+    color: rgba(17, 17, 17, 0.65);
+  }
+
+  :global(body.theme-light) .mqa-errors {
+    color: rgba(17, 17, 17, 0.75);
+    background: rgba(230, 40, 40, 0.06);
+    border-color: rgba(230, 40, 40, 0.2);
+  }
+
+  :global(body.theme-light) .mqa-debug-title {
+    color: rgba(17, 17, 17, 0.78);
+  }
+
+  :global(body.theme-light) .mqa-debug-pre {
     color: rgba(17, 17, 17, 0.65);
   }
 

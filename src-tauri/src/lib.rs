@@ -98,78 +98,13 @@ fn geometry_param_belongs_to_part(name: &str, part_id: &str) -> bool {
     let p = part_id.to_lowercase();
     if p.is_empty() { return false; }
 
-    // Determine membership by extracting all zone letters present in common tag formats.
-    // Examples:
-    //  ..._ID-A
-    //  ..._FDST_ID-B
-    //  ..._FDST_VIS-A^B
-    //  ..._FDST_VIS-!A^!B
-    // If the tag contains multiple letters (e.g. A^B), the same collider can belong to multiple zones.
-    fn extract_letters_after_tag(haystack: &str, tag: &str) -> HashSet<char> {
-        let mut out: HashSet<char> = HashSet::new();
-        let mut start = 0usize;
-        while let Some(pos) = haystack[start..].find(tag) {
-            let i = start + pos + tag.len();
-            let mut j = i;
-            // Read a compact token like: a, !a, a^b, !a^!b until a delimiter.
-            while j < haystack.len() {
-                let ch = haystack.as_bytes()[j] as char;
-                if ch.is_ascii_alphabetic() || ch == '^' || ch == '!' {
-                    j += 1;
-                    continue;
-                }
-                break;
-            }
-            let token = &haystack[i..j];
-            for ch in token.chars() {
-                if ch.is_ascii_alphabetic() {
-                    out.insert(ch.to_ascii_lowercase());
-                }
-            }
-            start = j;
-        }
-        out
-    }
-
-    let mut letters: HashSet<char> = HashSet::new();
-    letters.extend(extract_letters_after_tag(&n, "id-"));
-    letters.extend(extract_letters_after_tag(&n, "fdst_id-"));
-    letters.extend(extract_letters_after_tag(&n, "vis-"));
-
-    if p.len() != 1 {
-        return false;
-    }
-    let pc = p.chars().next().unwrap_or(' ');
-    letters.contains(&pc)
-}
-
-fn find_v2_dst_xob(parent: &Path, stem: &str) -> Option<PathBuf> {
-    let target = format!("{}_V2_dst.xob", stem);
-
-    let direct = parent.join(&target);
-    if direct.is_file() {
-        return Some(direct);
-    }
-
-    let mut best: Option<(usize, PathBuf)> = None;
-    for ent in WalkDir::new(parent).follow_links(false).into_iter().flatten() {
-        if !ent.file_type().is_file() {
-            continue;
-        }
-        let fname = match ent.file_name().to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        if fname.eq_ignore_ascii_case(&target) {
-            let depth = ent.depth();
-            let path = ent.path().to_path_buf();
-            match &best {
-                Some((d, _)) if *d <= depth => {}
-                _ => best = Some((depth, path)),
-            }
-        }
-    }
-    best.map(|(_, p)| p)
+    // Include exact part tags commonly used by Arma prefabs
+    if n.contains(&format!("id-{}", p)) { return true; }
+    if n.contains(&format!("fdst_id-{}", p)) { return true; }
+    // VIS tags like: ..._VIS-A^B, ..._VIS-!A, ..._VIS-!A^!B
+    if n.contains(&format!("vis-{}", p)) { return true; }
+    if n.contains(&format!("vis-!{}", p)) { return true; }
+    false
 }
 
 #[tauri::command]
@@ -186,15 +121,31 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
     let parent = xob_abs.parent().ok_or_else(|| "Invalid xob directory".to_string())?;
 
     // sibling v2 model
-    let v2_xob = find_v2_dst_xob(parent, stem)
-        .ok_or_else(|| "V2 dst file not found under base xob folder".to_string())?;
+    let v2_xob = parent.join(format!("{}_V2_dst.xob", stem));
+    if !v2_xob.is_file() {
+        return Err("V2 dst file not found next to base xob".into());
+    }
     let (v2_guid, v2_path) = read_xob_object_field_from_meta(&v2_xob)?;
 
     // Parse GeometryParams from v2 meta
     let v2_meta_path = PathBuf::from(format!("{}.meta", v2_xob.to_string_lossy()));
     let v2_meta_text = fs::read_to_string(&v2_meta_path)
         .map_err(|e| format!("Failed to read v2 .xob.meta: {}", e))?;
-    let geom_params = parse_geometry_param_names(&v2_meta_text);
+    let mut geom_params = parse_geometry_param_names(&v2_meta_text);
+
+    let base_meta_path = PathBuf::from(format!("{}.meta", xob_abs.to_string_lossy()));
+    if let Ok(base_meta_text) = fs::read_to_string(&base_meta_path) {
+        let base_params = parse_geometry_param_names(&base_meta_text)
+            .into_iter()
+            .filter(|n| n.to_lowercase().contains("fdst_"));
+        let mut seen: HashSet<String> = geom_params.iter().map(|s| s.to_lowercase()).collect();
+        for p in base_params {
+            let key = p.to_lowercase();
+            if seen.insert(key) {
+                geom_params.push(p);
+            }
+        }
+    }
 
     // Scan debris from Dst folder
     let mut debris_by_part: BTreeMap<String, Vec<(i32, MetaEntry)>> = BTreeMap::new();
@@ -1794,7 +1745,8 @@ async fn prefabdst_build(
         let mut v2_res: Option<String> = None;
         if let Some(stem) = xob_abs.file_stem().and_then(|s| s.to_str()) {
             if let Some(parent) = xob_abs.parent() {
-                if let Some(v2) = find_v2_dst_xob(parent, stem) {
+                let v2 = parent.join(format!("{}_V2_dst.xob", stem));
+                if v2.is_file() {
                     if let Ok((g2, r2)) = read_xob_object_field_from_meta(&v2) {
                         v2_guid = Some(g2);
                         v2_res = Some(r2);
@@ -2544,6 +2496,9 @@ fn mqa_report_from_xob(xob_path: String, workbench_port: Option<u16>) -> Result<
 import bpy
 import addon_utils
 
+debug = {{}}
+errors = []
+
 addons_dir = pathlib.Path(r'''{}''')
 if not addons_dir.exists():
     raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
@@ -2551,33 +2506,71 @@ sys.path.insert(0, str(addons_dir))
 
 try:
     addon_utils.enable('EnfusionBlenderTools', default_set=False, persistent=False)
+    debug['addon_enabled'] = True
 except Exception:
-    pass
+    debug['addon_enabled'] = False
 
 try:
-    from EnfusionBlenderTools import modelqa as _mqa
-    try:
-        _mqa.register()
-    except Exception:
-        pass
-except Exception:
-    pass
+    import EnfusionBlenderTools
+    debug['ebt_imported'] = True
+except Exception as e:
+    debug['ebt_imported'] = False
+    errors.append('import EnfusionBlenderTools failed: ' + str(e))
 
-from EnfusionBlenderTools.workbench import Workbench
-from EnfusionBlenderTools.core.fbx import fbx_io
+try:
+    import EnfusionBlenderTools.modelqa as modelqa
+    try:
+        modelqa.register()
+        debug['modelqa_registered'] = True
+    except Exception as e:
+        msg = str(e)
+        if 'already registered' in msg or 'already registered as a subclass' in msg:
+            debug['modelqa_registered'] = True
+            debug['modelqa_register_already'] = True
+        else:
+            debug['modelqa_registered'] = False
+            errors.append('modelqa.register failed: ' + msg)
+except Exception as e:
+    debug['modelqa_registered'] = False
+    errors.append('import modelqa failed: ' + str(e))
+
+try:
+    from EnfusionBlenderTools.workbench import Workbench
+    from EnfusionBlenderTools.core.fbx import fbx_io
+    debug['ebt_modules_ok'] = True
+except Exception as e:
+    debug['ebt_modules_ok'] = False
+    errors.append('import Workbench/fbx_io failed: ' + str(e))
+    raise
 
 Workbench.init(client_id='OwlTools', port={})
 fbx = pathlib.Path(r'''{}''')
 fbx_io.import_fbx(fbx)
 
+op_exists = False
 try:
-    bpy.ops.ebt.mqa_report_conventions()
+    if hasattr(bpy.ops, 'ebt') and ('mqa_report_conventions' in dir(bpy.ops.ebt)):
+        op_exists = True
 except Exception:
-    pass
+    op_exists = False
+debug['mqa_operator_exists'] = op_exists
+
+if op_exists:
+    try:
+        bpy.ops.ebt.mqa_report_conventions(asset_type='GENERIC')
+        debug['mqa_operator_ran'] = True
+    except Exception as e:
+        debug['mqa_operator_ran'] = False
+        errors.append('mqa_report_conventions failed: ' + str(e))
+else:
+    debug['mqa_operator_ran'] = False
+    errors.append('mqa_report_conventions operator not found')
 
 scene = bpy.context.scene
 items = []
 try:
+    if not hasattr(scene, 'ebt_report_messages'):
+        raise RuntimeError('scene.ebt_report_messages not found (modelqa not registered?)')
     msgs = scene.ebt_report_messages
     for m in msgs:
         objs = []
@@ -2592,10 +2585,11 @@ try:
             count=len(objs),
             objects=objs,
         ))
-except Exception:
+except Exception as e:
     items = []
+    errors.append('collect messages failed: ' + str(e))
 
-payload = dict(fbx=str(fbx), count=len(items), items=items)
+payload = dict(fbx=str(fbx), count=len(items), items=items, debug=debug, errors=errors)
 print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
 "#,
         addons_dir.to_string_lossy(),
