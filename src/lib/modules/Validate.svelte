@@ -22,6 +22,14 @@
   let assetType: 'Generic' | 'Building' = 'Generic';
   let saveLogPath = '';
   let saveLogFileName = '';
+  let blenderPath = '';
+  let configMessage = '';
+  let checkAllMessage = '';
+  let ebtAddonsDir = '';
+  let workbenchPort = 5700;
+  let showMqaPopup = false;
+  let mqaReport: any = null;
+  let checkAllRunning = false;
 
   const tabs: { id: ValidationTab; label: string; icon: string }[] = [
     { id: 'file', label: 'Validate asset', icon: '📄' },
@@ -30,6 +38,137 @@
   ];
 
   const assetTypes = ['Generic', 'Building'] as const;
+
+  async function loadAutosocketSettings() {
+    try {
+      const s = await invoke<any>('get_autosocket_settings');
+      const bp = (s?.blenderPath ?? s?.blender_path) as any;
+      if (bp && typeof bp === 'string') {
+        blenderPath = bp;
+      }
+      const ebt = (s?.ebtAddonsDir ?? s?.ebt_addons_dir) as any;
+      if (ebt && typeof ebt === 'string') {
+        ebtAddonsDir = ebt;
+      }
+    } catch (err) {
+      console.error('Failed to load autosocket settings', err);
+    }
+  }
+
+  function loadWorkbenchPort() {
+    try {
+      const p = localStorage.getItem('workbench_port');
+      if (p) {
+        const n = parseInt(p);
+        if (Number.isFinite(n)) workbenchPort = Math.max(1, Math.min(65535, n));
+      }
+    } catch {}
+  }
+
+  function saveWorkbenchPort() {
+    try {
+      localStorage.setItem('workbench_port', String(workbenchPort));
+    } catch {}
+  }
+
+  async function handleCheckAll() {
+    checkAllMessage = '';
+    if (!selectedFilePath) {
+      checkAllMessage = 'Please select .xob file first';
+      return;
+    }
+    if (!selectedFilePath.toLowerCase().endsWith('.xob')) {
+      checkAllMessage = 'Selected file must be .xob';
+      return;
+    }
+    if (checkAllRunning) return;
+    checkAllRunning = true;
+    try {
+      checkAllMessage = 'Opening Blender...';
+      invoke('open_fbx_in_blender', { xobPath: selectedFilePath, workbenchPort }).catch(() => {});
+      checkAllMessage = 'Generating MQA report...';
+      const res = await invoke<any>('mqa_report_from_xob', { xobPath: selectedFilePath, workbenchPort });
+      mqaReport = res;
+      showMqaPopup = true;
+      checkAllMessage = 'MQA report generated';
+    } catch (err: any) {
+      checkAllMessage = String(err?.message || err || 'Failed to open Blender');
+    } finally {
+      checkAllRunning = false;
+    }
+  }
+
+  function closeMqaPopup() {
+    showMqaPopup = false;
+  }
+
+  function handleBackdropClick(e: MouseEvent) {
+    if (e.target === e.currentTarget) {
+      closeMqaPopup();
+    }
+  }
+
+  function handleBackdropKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMqaPopup();
+    }
+  }
+
+  async function pickBlenderPath() {
+    try {
+      const selection = await open({
+        multiple: false,
+        filters: [{ name: 'Blender', extensions: ['exe'] }]
+      });
+      if (typeof selection === 'string' && selection) {
+        blenderPath = selection;
+        invoke('remember_blender_path', { path: blenderPath }).catch(() => {});
+      }
+    } catch (err) {
+      console.error('Blender selection failed', err);
+    }
+  }
+
+  function clearBlenderPath() {
+    blenderPath = '';
+    invoke('remember_blender_path', { path: null }).catch(() => {});
+  }
+
+  async function pickEbtAddonsDir() {
+    try {
+      const selection = await open({ directory: true, multiple: false });
+      if (typeof selection === 'string' && selection) {
+        ebtAddonsDir = selection;
+        invoke('remember_ebt_addons_dir', { path: ebtAddonsDir }).catch(() => {});
+      }
+    } catch (err) {
+      console.error('EBT addons dir selection failed', err);
+    }
+  }
+
+  function clearEbtAddonsDir() {
+    ebtAddonsDir = '';
+    invoke('remember_ebt_addons_dir', { path: null }).catch(() => {});
+  }
+
+  async function openFbxInBlender() {
+    configMessage = '';
+    if (!selectedFilePath) {
+      configMessage = 'Please select .xob file first';
+      return;
+    }
+    if (!selectedFilePath.toLowerCase().endsWith('.xob')) {
+      configMessage = 'Selected file must be .xob';
+      return;
+    }
+    try {
+      await invoke('open_fbx_in_blender', { xobPath: selectedFilePath, workbenchPort });
+      configMessage = 'Opening FBX in Blender...';
+    } catch (err: any) {
+      configMessage = String(err?.message || err || 'Failed to open FBX');
+    }
+  }
 
   async function pickSaveLogDirectory() {
     try {
@@ -210,6 +349,7 @@
   }
 
   onMount(() => {
+    loadWorkbenchPort();
     const onMouseMove = (e: MouseEvent) => {
       lastMouseX = e.clientX;
       lastMouseY = e.clientY;
@@ -304,6 +444,8 @@
         unlistenWebviewDrop = u;
       });
     } catch {}
+
+    loadAutosocketSettings();
   });
 
   onDestroy(() => {
@@ -420,19 +562,55 @@
             </div>
           </div>
 
-          <button class="btn btn-check-all">
+          <button class="btn btn-check-all" on:click={handleCheckAll} disabled={checkAllRunning}>
             <span class="check-all-icon">✓</span>
             Check All
           </button>
+          {#if checkAllMessage}
+            <div class="check-all-message">{checkAllMessage}</div>
+          {/if}
         </div>
       </div>
     {:else if activeTab === 'config'}
       <div class="tab-content">
-        <div class="placeholder-section">
-          <div class="placeholder-icon">⚙️</div>
+        <div class="config-section">
           <h3>Configuration</h3>
-          <p>Configure validation settings and options here.</p>
-          <div class="placeholder-hint">Coming soon</div>
+
+          <div class="config-block">
+            <div class="config-title">Blender Path</div>
+            <div class="config-row">
+              <input class="config-input" readonly value={blenderPath} placeholder="Select blender.exe" />
+              <button class="btn btn-secondary" on:click={pickBlenderPath}>Browse</button>
+              {#if blenderPath}
+                <button class="btn btn-secondary" on:click={clearBlenderPath}>Clear</button>
+              {/if}
+            </div>
+            <div class="config-title">EBT Addons Folder</div>
+            <div class="config-row">
+              <input class="config-input" readonly value={ebtAddonsDir} placeholder="Select .../Blender/scripts/addons" />
+              <button class="btn btn-secondary" on:click={pickEbtAddonsDir}>Browse</button>
+              {#if ebtAddonsDir}
+                <button class="btn btn-secondary" on:click={clearEbtAddonsDir}>Clear</button>
+              {/if}
+            </div>
+            <div class="config-title">Workbench Port</div>
+            <div class="config-row">
+              <input
+                class="config-input"
+                type="number"
+                min="1"
+                max="65535"
+                bind:value={workbenchPort}
+                on:change={saveWorkbenchPort}
+              />
+            </div>
+            <div class="config-actions">
+              <button class="btn btn-primary" on:click={openFbxInBlender}>Open FBX in Blender</button>
+            </div>
+            {#if configMessage}
+              <div class="config-message">{configMessage}</div>
+            {/if}
+          </div>
         </div>
       </div>
     {:else if activeTab === 'results'}
@@ -448,6 +626,56 @@
   </div>
 </div>
 
+{#if showMqaPopup}
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    tabindex="0"
+    on:click={handleBackdropClick}
+    on:keydown={handleBackdropKeydown}
+  >
+    <div class="modal" role="document" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title">MQA Report</div>
+        <button class="btn btn-secondary modal-close" on:click={closeMqaPopup}>Close</button>
+      </div>
+      <div class="modal-subtitle">
+        <div class="modal-meta">
+          <div class="modal-meta-row">FBX: {mqaReport?.fbx ?? ''}</div>
+          <div class="modal-meta-row">Items: {mqaReport?.count ?? 0}</div>
+        </div>
+      </div>
+      <div class="modal-body">
+        {#if Array.isArray(mqaReport?.items) && mqaReport.items.length}
+          <div class="mqa-list">
+            {#each mqaReport.items as item, idx (idx)}
+              <div class="mqa-item">
+                <div class="mqa-line">
+                  <span class="mqa-cat">[{item?.category ?? ''}]</span>
+                  <span class="mqa-msg">{item?.message ?? ''}</span>
+                  {#if (item?.count ?? 0) > 0}
+                    <span class="mqa-count">[{item.count}]</span>
+                  {/if}
+                </div>
+                {#if Array.isArray(item?.objects) && item.objects.length}
+                  <div class="mqa-objects">
+                    {#each item.objects as objName, j (j)}
+                      <div class="mqa-obj">- {objName}</div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="modal-empty">No reports to display.</div>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .validate-container {
     display: flex;
@@ -457,12 +685,12 @@
   }
 
   .header {
-    padding: 24px;
+    padding: 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   }
 
   .header h2 {
-    margin: 0 0 16px 0;
+    margin: 0 0 12px 0;
     font-size: 24px;
     font-weight: 600;
   }
@@ -522,14 +750,14 @@
 
   .content {
     flex: 1;
-    padding: 24px;
+    padding: 16px;
     overflow-y: auto;
   }
 
   .file-picker-section {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
   }
 
   .asset-type-section {
@@ -617,8 +845,8 @@
   .save-log-section {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px;
+    gap: 10px;
+    padding: 12px;
     background: rgba(255, 255, 255, 0.05);
     border-radius: 6px;
   }
@@ -631,11 +859,11 @@
   }
 
   .save-log-content {
-    min-height: 60px;
+    min-height: 48px;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 12px;
+    padding: 10px;
     background: rgba(255, 255, 255, 0.03);
     border-radius: 4px;
     border: 1px dashed rgba(255, 255, 255, 0.2);
@@ -681,7 +909,7 @@
   }
 
   .save-log-hint-icon {
-    font-size: 32px;
+    font-size: 28px;
     opacity: 0.4;
   }
 
@@ -724,7 +952,8 @@
   .drop-zone {
     border: 2px dashed rgba(255, 255, 255, 0.3);
     border-radius: 8px;
-    padding: 32px;
+    padding: 20px;
+    min-height: 140px;
     text-align: center;
     transition: all 200ms ease;
     cursor: pointer;
@@ -760,11 +989,11 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
   }
 
   .drop-icon {
-    font-size: 48px;
+    font-size: 40px;
     opacity: 0.5;
   }
 
@@ -864,12 +1093,12 @@
 
   .btn-check-all {
     width: 100%;
-    padding: 16px 24px;
+    padding: 12px 20px;
     background: linear-gradient(135deg, #1f73e6 0%, #1557b0 100%);
     color: #fff;
     border: none;
     border-radius: 8px;
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
     cursor: pointer;
     transition: all 200ms ease;
@@ -877,7 +1106,7 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    margin-top: 8px;
+    margin-top: 4px;
   }
 
   .btn-check-all:hover {
@@ -895,8 +1124,230 @@
     font-size: 18px;
   }
 
+  .check-all-message {
+    margin-top: 8px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.65);
+    word-break: break-word;
+  }
+
+  :global(body.theme-light) .check-all-message {
+    color: rgba(17, 17, 17, 0.65);
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 1000;
+  }
+
+  .modal {
+    width: min(920px, 100%);
+    max-height: min(80vh, 760px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(30, 30, 30, 0.98);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .modal-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .modal-close {
+    flex: 0 0 auto;
+  }
+
+  .modal-subtitle {
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .modal-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.65);
+  }
+
+  .modal-body {
+    padding: 12px 14px;
+    overflow: auto;
+  }
+
+  .modal-empty {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.65);
+  }
+
+  .mqa-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mqa-item {
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .mqa-line {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+
+  .mqa-cat {
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .mqa-msg {
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .mqa-count {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 12px;
+  }
+
+  .mqa-objects {
+    margin-top: 8px;
+    padding-left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .mqa-obj {
+    word-break: break-word;
+  }
+
+  :global(body.theme-light) .modal {
+    background: rgba(255, 255, 255, 0.98);
+    border-color: rgba(17, 17, 17, 0.12);
+  }
+
+  :global(body.theme-light) .modal-title {
+    color: rgba(17, 17, 17, 0.9);
+  }
+
+  :global(body.theme-light) .modal-meta,
+  :global(body.theme-light) .modal-empty,
+  :global(body.theme-light) .mqa-msg,
+  :global(body.theme-light) .mqa-count,
+  :global(body.theme-light) .mqa-objects {
+    color: rgba(17, 17, 17, 0.65);
+  }
+
+  :global(body.theme-light) .mqa-cat {
+    color: rgba(17, 17, 17, 0.85);
+  }
+
+  :global(body.theme-light) .mqa-item {
+    background: rgba(17, 17, 17, 0.04);
+    border-color: rgba(17, 17, 17, 0.08);
+  }
+
   .tab-content {
     animation: fadeIn 150ms ease;
+  }
+
+  .config-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .config-section h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .config-block {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+  }
+
+  .config-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .config-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .config-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 12px;
+  }
+
+  .config-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .config-message {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.65);
+    word-break: break-word;
+  }
+
+  :global(body.theme-light) .config-block {
+    background: rgba(17, 17, 17, 0.05);
+  }
+
+  :global(body.theme-light) .config-title {
+    color: rgba(17, 17, 17, 0.9);
+  }
+
+  :global(body.theme-light) .config-input {
+    background: rgba(17, 17, 17, 0.06);
+    border-color: rgba(17, 17, 17, 0.14);
+    color: rgba(17, 17, 17, 0.9);
+  }
+
+  :global(body.theme-light) .config-message {
+    color: rgba(17, 17, 17, 0.65);
   }
 
   @keyframes fadeIn {

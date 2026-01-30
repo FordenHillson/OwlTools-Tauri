@@ -98,13 +98,78 @@ fn geometry_param_belongs_to_part(name: &str, part_id: &str) -> bool {
     let p = part_id.to_lowercase();
     if p.is_empty() { return false; }
 
-    // Include exact part tags commonly used by Arma prefabs
-    if n.contains(&format!("id-{}", p)) { return true; }
-    if n.contains(&format!("fdst_id-{}", p)) { return true; }
-    // VIS tags like: ..._VIS-A^B, ..._VIS-!A, ..._VIS-!A^!B
-    if n.contains(&format!("vis-{}", p)) { return true; }
-    if n.contains(&format!("vis-!{}", p)) { return true; }
-    false
+    // Determine membership by extracting all zone letters present in common tag formats.
+    // Examples:
+    //  ..._ID-A
+    //  ..._FDST_ID-B
+    //  ..._FDST_VIS-A^B
+    //  ..._FDST_VIS-!A^!B
+    // If the tag contains multiple letters (e.g. A^B), the same collider can belong to multiple zones.
+    fn extract_letters_after_tag(haystack: &str, tag: &str) -> HashSet<char> {
+        let mut out: HashSet<char> = HashSet::new();
+        let mut start = 0usize;
+        while let Some(pos) = haystack[start..].find(tag) {
+            let i = start + pos + tag.len();
+            let mut j = i;
+            // Read a compact token like: a, !a, a^b, !a^!b until a delimiter.
+            while j < haystack.len() {
+                let ch = haystack.as_bytes()[j] as char;
+                if ch.is_ascii_alphabetic() || ch == '^' || ch == '!' {
+                    j += 1;
+                    continue;
+                }
+                break;
+            }
+            let token = &haystack[i..j];
+            for ch in token.chars() {
+                if ch.is_ascii_alphabetic() {
+                    out.insert(ch.to_ascii_lowercase());
+                }
+            }
+            start = j;
+        }
+        out
+    }
+
+    let mut letters: HashSet<char> = HashSet::new();
+    letters.extend(extract_letters_after_tag(&n, "id-"));
+    letters.extend(extract_letters_after_tag(&n, "fdst_id-"));
+    letters.extend(extract_letters_after_tag(&n, "vis-"));
+
+    if p.len() != 1 {
+        return false;
+    }
+    let pc = p.chars().next().unwrap_or(' ');
+    letters.contains(&pc)
+}
+
+fn find_v2_dst_xob(parent: &Path, stem: &str) -> Option<PathBuf> {
+    let target = format!("{}_V2_dst.xob", stem);
+
+    let direct = parent.join(&target);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let mut best: Option<(usize, PathBuf)> = None;
+    for ent in WalkDir::new(parent).follow_links(false).into_iter().flatten() {
+        if !ent.file_type().is_file() {
+            continue;
+        }
+        let fname = match ent.file_name().to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        if fname.eq_ignore_ascii_case(&target) {
+            let depth = ent.depth();
+            let path = ent.path().to_path_buf();
+            match &best {
+                Some((d, _)) if *d <= depth => {}
+                _ => best = Some((depth, path)),
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 #[tauri::command]
@@ -121,10 +186,8 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
     let parent = xob_abs.parent().ok_or_else(|| "Invalid xob directory".to_string())?;
 
     // sibling v2 model
-    let v2_xob = parent.join(format!("{}_V2_dst.xob", stem));
-    if !v2_xob.is_file() {
-        return Err("V2 dst file not found next to base xob".into());
-    }
+    let v2_xob = find_v2_dst_xob(parent, stem)
+        .ok_or_else(|| "V2 dst file not found under base xob folder".to_string())?;
     let (v2_guid, v2_path) = read_xob_object_field_from_meta(&v2_xob)?;
 
     // Parse GeometryParams from v2 meta
@@ -1731,8 +1794,7 @@ async fn prefabdst_build(
         let mut v2_res: Option<String> = None;
         if let Some(stem) = xob_abs.file_stem().and_then(|s| s.to_str()) {
             if let Some(parent) = xob_abs.parent() {
-                let v2 = parent.join(format!("{}_V2_dst.xob", stem));
-                if v2.is_file() {
+                if let Some(v2) = find_v2_dst_xob(parent, stem) {
                     if let Ok((g2, r2)) = read_xob_object_field_from_meta(&v2) {
                         v2_guid = Some(g2);
                         v2_res = Some(r2);
@@ -2311,6 +2373,7 @@ struct AutoSettings {
     save_dir: Option<String>,
     extra_dirs: Option<Vec<String>>,
     blender_path: Option<String>,
+    ebt_addons_dir: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -2436,6 +2499,215 @@ fn remember_blender_path(path: Option<String>) -> Result<(), String> {
     settings.blender_path = path.filter(|p| !p.is_empty());
     save_settings(&settings)
 }
+
+#[tauri::command]
+fn remember_ebt_addons_dir(path: Option<String>) -> Result<(), String> {
+    let mut settings = load_settings();
+    settings.ebt_addons_dir = path.filter(|p| !p.is_empty());
+    save_settings(&settings)
+}
+
+#[tauri::command]
+fn mqa_report_from_xob(xob_path: String, workbench_port: Option<u16>) -> Result<JsonValue, String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    if !xob_abs.is_file() {
+        return Err("Invalid xob path".into());
+    }
+    let fbx_abs = xob_abs.with_extension("fbx");
+    if !fbx_abs.is_file() {
+        return Err(format!(
+            "FBX not found next to xob: {}",
+            fbx_abs.to_string_lossy()
+        ));
+    }
+
+    let settings = load_settings();
+    let blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path)
+        .ok_or_else(|| "Blender not configured".to_string())?;
+
+    let addons_dir = settings
+        .ebt_addons_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| "EBT addons directory not configured".to_string())?;
+
+    let wb_port: u16 = workbench_port.unwrap_or(5700);
+
+    let py = format!(
+        r#"import sys, pathlib, json
+import bpy
+import addon_utils
+
+addons_dir = pathlib.Path(r'''{}''')
+if not addons_dir.exists():
+    raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
+sys.path.insert(0, str(addons_dir))
+
+try:
+    addon_utils.enable('EnfusionBlenderTools', default_set=False, persistent=False)
+except Exception:
+    pass
+
+try:
+    from EnfusionBlenderTools import modelqa as _mqa
+    try:
+        _mqa.register()
+    except Exception:
+        pass
+except Exception:
+    pass
+
+from EnfusionBlenderTools.workbench import Workbench
+from EnfusionBlenderTools.core.fbx import fbx_io
+
+Workbench.init(client_id='OwlTools', port={})
+fbx = pathlib.Path(r'''{}''')
+fbx_io.import_fbx(fbx)
+
+try:
+    bpy.ops.ebt.mqa_report_conventions()
+except Exception:
+    pass
+
+scene = bpy.context.scene
+items = []
+try:
+    msgs = scene.ebt_report_messages
+    for m in msgs:
+        objs = []
+        try:
+            for o in m.objs:
+                objs.append(getattr(o, 'name', ''))
+        except Exception:
+            pass
+        items.append(dict(
+            category=getattr(m, 'category', ''),
+            message=getattr(m, 'message', ''),
+            count=len(objs),
+            objects=objs,
+        ))
+except Exception:
+    items = []
+
+payload = dict(fbx=str(fbx), count=len(items), items=items)
+print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
+"#,
+        addons_dir.to_string_lossy(),
+        wb_port,
+        fbx_abs.to_string_lossy()
+    );
+
+    let out = std::process::Command::new(blender)
+        .args(["--background", "--factory-startup", "--python-expr", &py])
+        .output()
+        .map_err(|e| format!("Failed to run Blender: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let mut json_line: Option<String> = None;
+    for line in stdout.lines().rev() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("OWLTOOLS_MQA_JSON=") {
+            json_line = Some(rest.to_string());
+            break;
+        }
+    }
+    let json_line = json_line.ok_or_else(|| {
+        if stderr.trim().is_empty() {
+            "Failed to capture MQA report from Blender".to_string()
+        } else {
+            format!("Failed to capture MQA report from Blender: {}", stderr.trim())
+        }
+    })?;
+    serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
+}
+
+ #[tauri::command]
+ fn open_fbx_in_blender(xob_path: String, workbench_port: Option<u16>) -> Result<(), String> {
+     let xob_abs = PathBuf::from(&xob_path);
+     if !xob_abs.is_file() {
+         return Err("Invalid xob path".into());
+     }
+     let fbx_abs = xob_abs.with_extension("fbx");
+     if !fbx_abs.is_file() {
+         return Err(format!(
+             "FBX not found next to xob: {}",
+             fbx_abs.to_string_lossy()
+         ));
+     }
+
+     let settings = load_settings();
+     let blender = settings
+         .blender_path
+         .as_deref()
+         .map(PathBuf::from)
+         .filter(|p| p.is_file())
+         .or_else(resolve_blender_path)
+         .ok_or_else(|| "Blender not configured".to_string())?;
+
+     let addons_dir = settings
+         .ebt_addons_dir
+         .as_deref()
+         .map(PathBuf::from)
+         .filter(|p| p.is_dir())
+         .ok_or_else(|| "EBT addons directory not configured".to_string())?;
+
+     let wb_port: u16 = workbench_port.unwrap_or(5700);
+
+     let py = format!(
+         r#"import sys, pathlib
+import bpy
+import addon_utils
+
+addons_dir = pathlib.Path(r'''{}''')
+if not addons_dir.exists():
+    raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
+sys.path.insert(0, str(addons_dir))
+
+try:
+    addon_utils.enable('EnfusionBlenderTools', default_set=True, persistent=True)
+    try:
+        bpy.ops.wm.save_userpref()
+    except Exception:
+        pass
+except Exception:
+    pass
+
+try:
+    from EnfusionBlenderTools.workbench import Workbench
+    from EnfusionBlenderTools.core.fbx import fbx_io
+except Exception as e:
+    raise RuntimeError('Failed to import EnfusionBlenderTools modules: ' + str(e))
+
+try:
+    Workbench.init(client_id='OwlTools', port={})
+except Exception as e:
+    raise RuntimeError('Workbench.init failed: ' + str(e))
+
+fbx = pathlib.Path(r'''{}''')
+fbx_io.import_fbx(fbx)
+try:
+    bpy.ops.ebt.mqa_report_conventions()
+except Exception:
+    pass
+"#,
+         addons_dir.to_string_lossy(),
+         wb_port,
+         fbx_abs.to_string_lossy()
+     );
+
+     std::process::Command::new(blender)
+         .args(["--factory-startup", "--python-expr", &py])
+         .spawn()
+         .map_err(|e| format!("Failed to launch Blender: {}", e))?;
+     Ok(())
+ }
 
 fn cached_prefab_status() -> PrefabCacheStatus {
     let path = prefab_index_path();
@@ -3498,6 +3770,9 @@ pub fn run() {
             remember_save_dir,
             remember_extra_dirs,
             remember_blender_path,
+            remember_ebt_addons_dir,
+            open_fbx_in_blender,
+            mqa_report_from_xob,
             create_new_et_from_xob,
             suggest_prefab_folders_from_xob,
             create_new_et_with_meta_from_xob,
