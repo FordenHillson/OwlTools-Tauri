@@ -68,6 +68,74 @@ async fn prefabdst_read_meta(xob_path: String) -> Result<MetaEntry, String> {
     }
 }
 
+#[tauri::command]
+async fn prefabdst_find_ruin_xob(xob_path: String) -> Result<Option<String>, String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    if !xob_abs.is_file() {
+        return Err("Invalid xob path".into());
+    }
+    let parent = xob_abs
+        .parent()
+        .ok_or_else(|| "Invalid xob directory".to_string())?
+        .to_path_buf();
+    let parent_parent = parent.parent().map(|p| p.to_path_buf());
+    let stem0 = xob_abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Invalid xob file name".to_string())?
+        .to_string();
+    let stem = Regex::new(r"(?i)_(ruin|ruined)$")
+        .unwrap()
+        .replace(&stem0, "")
+        .to_string();
+
+    let rx = Regex::new(&format!(r"(?i)^{}_(ruin|ruined)\.xob$", regex::escape(&stem)))
+        .map_err(|e| format!("Regex error: {}", e))?;
+
+    fn scan_root(root: &Path, rx: &Regex) -> Option<String> {
+        let mut best_ruin: Option<String> = None;
+        let mut best_ruined: Option<String> = None;
+        for ent in WalkDir::new(root)
+            .follow_links(false)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = ent.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if !rx.is_match(name) {
+                continue;
+            }
+            let lower = name.to_lowercase();
+            let abs = p.to_string_lossy().to_string();
+            if lower.ends_with("_ruin.xob") {
+                best_ruin = Some(abs);
+                break;
+            }
+            if lower.ends_with("_ruined.xob") {
+                best_ruined = Some(abs);
+            }
+        }
+        best_ruin.or(best_ruined)
+    }
+
+    if let Some(found) = scan_root(&parent, &rx) {
+        return Ok(Some(found));
+    }
+    if let Some(pp) = parent_parent {
+        if let Some(found) = scan_root(&pp, &rx) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
 fn parse_geometry_param_names(v2_meta_text: &str) -> Vec<String> {
     // Extract names from lines like:
     //  GeometryParam UTM_Base_Ruin_base {
@@ -150,7 +218,11 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
     // Scan debris from Dst folder
     let mut debris_by_part: BTreeMap<String, Vec<(i32, MetaEntry)>> = BTreeMap::new();
     if let Some(dst_dir) = find_dst_directory(&xob_abs) {
-        let rx = Regex::new(&format!(r"(?i)^{}_V2_dst_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$", regex::escape(stem))).unwrap();
+        let rx = Regex::new(&format!(
+            r"(?i)^(?:{}_V2_dst|{}_FDST)_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$",
+            regex::escape(stem),
+            regex::escape(stem)
+        )).unwrap();
         if let Ok(rd) = fs::read_dir(&dst_dir) {
             for ent in rd.flatten() {
                 let p = ent.path();
@@ -1545,12 +1617,26 @@ fn clone_fractalpart_block(block: &str, src_letter: char, new_letter: char) -> S
     out
 }
 
-fn build_debris_infos_block(items: &[MetaEntry], indent: &str) -> String {
+fn format_mass(mass: f32) -> String {
+    if !mass.is_finite() {
+        return "0".to_string();
+    }
+    let m = mass.max(0.0);
+    if (m.fract()).abs() < 0.00001 {
+        format!("{:.0}", m)
+    } else {
+        let s = format!("{}", m);
+        s
+    }
+}
+
+fn build_debris_infos_block(items: &[MetaEntry], indent: &str, debris_mass: f32) -> String {
     // Build a list of SCR_DebrisInfo blocks.
     // We don't currently have offsets/mass; use neutral defaults.
     if items.is_empty() {
         return format!("{}", "");
     }
+    let mass_s = format_mass(debris_mass);
     let mut lines: Vec<String> = Vec::new();
     for e in items {
         let info_id = gen_guid16();
@@ -1561,7 +1647,7 @@ fn build_debris_infos_block(items: &[MetaEntry], indent: &str) -> String {
         lines.push(format!("{}  Offset 0 0 0", indent));
         lines.push(format!("{}  Angles 0.00001 0 0", indent));
         lines.push(format!("{} }}", indent));
-        lines.push(format!("{} m_fMass 500", indent));
+        lines.push(format!("{} m_fMass {}", indent, mass_s));
         lines.push(format!("{}}}", indent));
     }
     lines.join("\n")
@@ -1577,7 +1663,7 @@ fn build_colliders_line(tags: &[String]) -> String {
         .join(" ")
 }
 
-fn replace_full_dst_markers(text: &str, scan: &FullDstScanResult) -> String {
+fn replace_full_dst_markers(text: &str, scan: &FullDstScanResult, debris_mass: f32) -> String {
     // Replace {{DEBRIS_ID-X}} and {{COLLIDERS_ID-X}} markers.
     let mut by_part: HashMap<String, (Vec<MetaEntry>, Vec<String>)> = HashMap::new();
     for z in &scan.zones {
@@ -1594,7 +1680,7 @@ fn replace_full_dst_markers(text: &str, scan: &FullDstScanResult) -> String {
             let (debris, _cols) = by_part.get(pid).cloned().unwrap_or_default();
             // Indent children one extra space relative to marker line.
             let child_indent = format!("{} ", indent);
-            build_debris_infos_block(&debris, &child_indent)
+            build_debris_infos_block(&debris, &child_indent, debris_mass)
         })
         .to_string();
 
@@ -1714,6 +1800,7 @@ async fn prefabdst_build(
     preset_text: String,
     zones: usize,
     hp_zone: i32,
+    debris_mass: f32,
     model_files: Vec<String>,
     save_folder: String,
     scr_override: Option<ScrDstScanResult>,
@@ -1732,6 +1819,7 @@ async fn prefabdst_build(
     let total = model_files.len();
     emit_prefabdst_log(&app, "info", format!("Preset: {}", preset_file), None, None);
     emit_prefabdst_log(&app, "info", format!("Zones: {} (hp={})", zones, hp_zone), None, None);
+    emit_prefabdst_log(&app, "info", format!("Debris mass: {}", format_mass(debris_mass)), None, None);
 
     let mut out_paths: Vec<String> = Vec::new();
     for (idx, xob_path) in model_files.iter().enumerate() {
@@ -1811,7 +1899,7 @@ async fn prefabdst_build(
         if gen_key != "template" {
             if et_text.contains("{{DEBRIS_ID-") || et_text.contains("{{COLLIDERS_ID-") {
                 if let Some(scan) = full_scan.as_ref() {
-                    et_text = replace_full_dst_markers(&et_text, scan);
+                    et_text = replace_full_dst_markers(&et_text, scan, debris_mass);
                 } else {
                     emit_prefabdst_log(
                         &app,
@@ -3788,6 +3876,7 @@ pub fn run() {
             prefabdst_scan_dst,
             prefabdst_scan_full_dst,
             prefabdst_read_meta,
+            prefabdst_find_ruin_xob,
             
         ])
         .run(tauri::generate_context!())

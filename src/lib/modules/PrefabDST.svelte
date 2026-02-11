@@ -16,6 +16,7 @@
   let presetKey = $state<string>('');
   let zones = $state<number>(3);
   let hpZone = $state<number>(50);
+  let debrisMass = $state<number>(500);
 
   let modelFiles = $state<string[]>([]);
   let saveFolder = $state<string>('');
@@ -41,6 +42,50 @@
     const i2 = p.lastIndexOf('/');
     const i = Math.max(i1, i2);
     return i >= 0 ? p.slice(0, i) : '';
+  }
+
+  function basename(p: string): string {
+    if (!p) return '';
+    const i1 = p.lastIndexOf('\\');
+    const i2 = p.lastIndexOf('/');
+    const i = Math.max(i1, i2);
+    return i >= 0 ? p.slice(i + 1) : p;
+  }
+
+  function joinPath(dir: string, name: string): string {
+    const d = String(dir || '').trim();
+    const n = String(name || '').trim();
+    if (!d) return n;
+    if (!n) return d;
+    const sep = d.includes('\\') ? '\\' : '/';
+    return d.endsWith('\\') || d.endsWith('/') ? `${d}${n}` : `${d}${sep}${n}`;
+  }
+
+  function fileStem(p: string): string {
+    const b = basename(p);
+    const i = b.lastIndexOf('.');
+    return i > 0 ? b.slice(0, i) : b;
+  }
+
+  async function tryReadXobMeta(xobPath: string): Promise<{ guid: string; path: string } | null> {
+    try {
+      const meta = await invoke<{ guid: string; path: string }>('prefabdst_read_meta', { xobPath });
+      const g = String((meta as any)?.guid || '');
+      const p = String((meta as any)?.path || xobPath);
+      if (!g) return null;
+      return { guid: g, path: p };
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveSiblingRuinXobIfAny(xobPath: string): Promise<string> {
+    const base = normalizeXobPath(xobPath);
+    try {
+      const found = await invoke<string | null>('prefabdst_find_ruin_xob', { xobPath: base });
+      if (typeof found === 'string' && found) return found;
+    } catch {}
+    return base;
   }
 
   // ---- Drag & Drop helpers (adapted from SocketManager) ----
@@ -318,6 +363,10 @@
     !!selectedPreset && /scr_destructible/i.test(selectedPreset.file || selectedPreset.key || '') && (selectedPreset.generator || '').toLowerCase() === 'template'
   );
 
+  const isScrDestructibleA4 = $derived(
+    !!selectedPreset && /scr_destructible_A4\.preset/i.test(selectedPreset.file || '') && (selectedPreset.generator || '').toLowerCase() === 'template'
+  );
+
   const isFullDst = $derived(
     !!selectedPreset && /fulldst|full_dst/i.test(selectedPreset.file || selectedPreset.key || '') && (selectedPreset.generator || '').toLowerCase() === 'zone_fractal'
   );
@@ -474,6 +523,28 @@
       scrBaseGuid = String(r.base_guid || '');
       scrBasePath = String(r.base_path || '');
       scrPhases = Array.isArray(r.phases) ? (r.phases as ScrPhase[]) : [];
+
+      if (isScrDestructibleA4 && scrPhases.length === 0) {
+        const baseMeta = await tryReadXobMeta(activeModelFile);
+        if (baseMeta) {
+          scrBaseGuid = baseMeta.guid;
+          scrBasePath = baseMeta.path;
+        }
+
+        const ruinAbs = await resolveSiblingRuinXobIfAny(activeModelFile);
+        if (ruinAbs && ruinAbs !== normalizeXobPath(activeModelFile)) {
+          const ruinMeta = await tryReadXobMeta(ruinAbs);
+          if (ruinMeta) {
+            scrPhases = [{ pid: '01', model_guid: ruinMeta.guid, model_path: ruinMeta.path, debris: [] }];
+          }
+        }
+        if (scrPhases.length) {
+          pushLog('INFO', 'Auto-filled dst_01 from sibling ruin/ruined .xob');
+        } else {
+          pushLog('WARN', 'No _Ruin/_Ruined .xob found for this base file.');
+        }
+      }
+
       scrSel = null;
       persistScrForActive();
       pushLog('INFO', `Scan dst done. Found ${scrPhases.length} phase(s).`);
@@ -628,14 +699,20 @@
         filters: [{ name: 'XOB', extensions: ['xob'] }]
       });
       if (Array.isArray(selection)) {
-        const next = Array.from(new Set([...modelFiles, ...selection]));
+        const picked = isScrDestructibleA4
+          ? await Promise.all(selection.map((p) => resolveSiblingRuinXobIfAny(p)))
+          : selection.map((p) => normalizeXobPath(p));
+        const next = Array.from(new Set([...modelFiles, ...picked]));
         modelFiles = next;
         pushLog('INFO', `Picked ${selection.length} file(s).`);
         if (!saveFolder && modelFiles.length > 0) {
           saveFolder = dirname(modelFiles[0]);
         }
       } else if (typeof selection === 'string') {
-        modelFiles = Array.from(new Set([...modelFiles, selection]));
+        const resolved = isScrDestructibleA4
+          ? await resolveSiblingRuinXobIfAny(selection)
+          : normalizeXobPath(selection);
+        modelFiles = Array.from(new Set([...modelFiles, resolved]));
         pushLog('INFO', 'Picked 1 file.');
         if (!saveFolder && modelFiles.length > 0) {
           saveFolder = dirname(modelFiles[0]);
@@ -740,6 +817,7 @@
             presetText: presetText,
             zones,
             hpZone: hpZone,
+            debrisMass: debrisMass,
             modelFiles: [f],
             saveFolder: saveFolder,
             scrOverride: per
@@ -753,6 +831,7 @@
           presetText: presetText,
           zones,
           hpZone: hpZone,
+          debrisMass: debrisMass,
           modelFiles: modelFiles,
           saveFolder: saveFolder,
           scrOverride
@@ -881,6 +960,19 @@
       <div class="row">
         <label for="prefabdst-hpzone">HP Zone:</label>
         <input id="prefabdst-hpzone" type="number" min="1" max="9999" step="1" bind:value={hpZone} oninput={() => (hpZone = clampInt(hpZone, 1, 9999))} disabled={isBuilding} />
+      </div>
+      <div class="row">
+        <label for="prefabdst-debrismass">Debris Mass (m_fMass):</label>
+        <input
+          id="prefabdst-debrismass"
+          type="number"
+          min="0"
+          max="999999"
+          step="1"
+          bind:value={debrisMass}
+          oninput={() => (debrisMass = clampInt(debrisMass, 0, 999999))}
+          disabled={isBuilding}
+        />
       </div>
     </div>
   {/if}

@@ -44,6 +44,15 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
      "A"
     }
    }
+   DamagePhases {
+    FractalPartDestructionPhase "{gen guid}" {
+     PhaseDestroyEffects {
+      SCR_ParticleEffect "{gen guid}" {
+       m_Particle "{70D6B6836428988B}Particles/Effects/Destruction/Explosion/Explosion_RPL5.ptc"
+      }
+     }
+    }
+   }
    LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
     PhaseStartEffects {
      SCR_AdvDebrisEffect "{gen guid}" {
@@ -77,6 +86,15 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
     }
     PhaseShowIds {
      "B"
+    }
+   }
+   DamagePhases {
+    FractalPartDestructionPhase "{gen guid}" {
+     PhaseDestroyEffects {
+      SCR_ParticleEffect "{gen guid}" {
+       m_Particle "{70D6B6836428988B}Particles/Effects/Destruction/Explosion/Explosion_RPL5.ptc"
+      }
+     }
     }
    }
    LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
