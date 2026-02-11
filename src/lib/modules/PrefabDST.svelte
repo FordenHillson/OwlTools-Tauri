@@ -390,6 +390,7 @@
   let fullV2Guid = $state<string>('');
   let fullV2Path = $state<string>('');
   let fullZones = $state<FullDstZone[]>([]);
+  let fullNewRows = $state<Record<string, boolean>>({});
   let fullSel:
     | { kind: 'base' }
     | { kind: 'v2' }
@@ -508,6 +509,187 @@
       ...fullByFile,
       [f]: { base_guid: fullBaseGuid, base_path: fullBasePath, v2_guid: fullV2Guid, v2_path: fullV2Path, zones: fullZones }
     };
+  }
+
+  function fullRowKey(kind: 'zone' | 'debris' | 'collider', part_id: string, idx?: number): string {
+    if (kind === 'zone') return `zone:${String(part_id || '')}`;
+    if (typeof idx === 'number') return `${kind}:${String(part_id || '')}:${idx}`;
+    return `${kind}:${String(part_id || '')}`;
+  }
+
+  function markFullRowNew(kind: 'zone' | 'debris' | 'collider', part_id: string, idx?: number) {
+    const k = fullRowKey(kind, part_id, idx);
+    fullNewRows = { ...fullNewRows, [k]: true };
+  }
+
+  function clearFullRowNew(kind: 'zone' | 'debris' | 'collider', part_id: string, idx?: number) {
+    const k = fullRowKey(kind, part_id, idx);
+    if (!fullNewRows[k]) return;
+    const next = { ...fullNewRows };
+    delete next[k];
+    fullNewRows = next;
+  }
+
+  function isFullRowNew(kind: 'zone' | 'debris' | 'collider', part_id: string, idx?: number): boolean {
+    const k = fullRowKey(kind, part_id, idx);
+    return !!fullNewRows[k];
+  }
+
+  function clearFullNewRowsFor(kind: 'debris' | 'collider', part_id: string) {
+    const pid = String(part_id || '');
+    const prefix = `${kind}:${pid}:`;
+    const next = { ...fullNewRows };
+    for (const k of Object.keys(next)) {
+      if (k.startsWith(prefix)) delete next[k];
+    }
+    fullNewRows = next;
+  }
+
+  async function pickXobMetaFromDialog(): Promise<{ guid: string; path: string } | null> {
+    try {
+      const pick = await open({ multiple: false, filters: [{ name: 'XOB', extensions: ['xob'] }] });
+      if (typeof pick !== 'string' || !pick) return null;
+      const meta = await invoke<{ guid: string; path: string }>('prefabdst_read_meta', { xobPath: pick });
+      const g = String((meta as any)?.guid || '');
+      const p = String((meta as any)?.path || pick);
+      return { guid: g, path: p };
+    } catch {
+      return null;
+    }
+  }
+
+  function nextFullPartId(): string {
+    let max = 0;
+    for (const z of fullZones) {
+      const n = parseInt(String(z.part_id || ''), 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+    return String(max + 1).padStart(2, '0');
+  }
+
+  function addFullZone() {
+    if (fullZones.length >= 26) return;
+    const pid = nextFullPartId();
+    fullZones = [...fullZones, { part_id: pid, debris: [], colliders: [] }];
+    zones = clampInt(fullZones.length || 1, 1, 26);
+    markFullRowNew('zone', pid);
+    fullSel = { kind: 'zone', part_id: pid };
+    persistFullForActive();
+  }
+
+  function removeFullZone(part_id: string) {
+    if (fullZones.length <= 1) return;
+    const pid = String(part_id || '');
+    fullZones = fullZones.filter((z) => z.part_id !== pid);
+    zones = clampInt(fullZones.length || 1, 1, 26);
+    if (fullSel && fullSel.kind === 'zone' && fullSel.part_id === pid) fullSel = null;
+    if (fullSel && (fullSel.kind === 'debris' || fullSel.kind === 'collider') && fullSel.part_id === pid) fullSel = null;
+    persistFullForActive();
+  }
+
+  function addFullDebris(part_id: string) {
+    const pid = String(part_id || '');
+    fullZones = fullZones.map((z) => {
+      if (z.part_id !== pid) return z;
+      return { ...z, debris: [...z.debris, { guid: '', path: '' }] };
+    });
+    const z = fullZones.find((x) => x.part_id === pid);
+    const idx = (z?.debris.length ?? 1) - 1;
+    markFullRowNew('debris', pid, idx);
+    fullSel = { kind: 'debris', part_id: pid, idx };
+    persistFullForActive();
+  }
+
+  function removeFullDebris(part_id: string) {
+    const pid = String(part_id || '');
+    const z = fullZones.find((x) => x.part_id === pid);
+    const len = z?.debris.length ?? 0;
+    if (len <= 0) return;
+    const removeIdx = len - 1;
+    fullZones = fullZones.map((zz) => (zz.part_id === pid ? { ...zz, debris: zz.debris.slice(0, -1) } : zz));
+    if (fullSel && fullSel.kind === 'debris' && fullSel.part_id === pid && fullSel.idx >= removeIdx) fullSel = null;
+    clearFullNewRowsFor('debris', pid);
+    persistFullForActive();
+  }
+
+  function removeFullDebrisAt(part_id: string, idx: number) {
+    const pid = String(part_id || '');
+    const i = clampInt(idx, 0, 999999);
+    fullZones = fullZones.map((z) => (z.part_id === pid ? { ...z, debris: z.debris.filter((_, di) => di !== i) } : z));
+    if (fullSel && fullSel.kind === 'debris' && fullSel.part_id === pid) {
+      if (fullSel.idx === i) fullSel = null;
+      else if (fullSel.idx > i) fullSel = { kind: 'debris', part_id: pid, idx: fullSel.idx - 1 };
+    }
+    clearFullNewRowsFor('debris', pid);
+    persistFullForActive();
+  }
+
+  function addFullCollider(part_id: string) {
+    const pid = String(part_id || '');
+    fullZones = fullZones.map((z) => {
+      if (z.part_id !== pid) return z;
+      return { ...z, colliders: [...z.colliders, ''] };
+    });
+    const z = fullZones.find((x) => x.part_id === pid);
+    const idx = (z?.colliders.length ?? 1) - 1;
+    markFullRowNew('collider', pid, idx);
+    fullSel = { kind: 'collider', part_id: pid, idx };
+    persistFullForActive();
+  }
+
+  function removeFullCollider(part_id: string) {
+    const pid = String(part_id || '');
+    const z = fullZones.find((x) => x.part_id === pid);
+    const len = z?.colliders.length ?? 0;
+    if (len <= 0) return;
+    const removeIdx = len - 1;
+    fullZones = fullZones.map((zz) => (zz.part_id === pid ? { ...zz, colliders: zz.colliders.slice(0, -1) } : zz));
+    if (fullSel && fullSel.kind === 'collider' && fullSel.part_id === pid && fullSel.idx >= removeIdx) fullSel = null;
+    clearFullNewRowsFor('collider', pid);
+    persistFullForActive();
+  }
+
+  function removeFullColliderAt(part_id: string, idx: number) {
+    const pid = String(part_id || '');
+    const i = clampInt(idx, 0, 999999);
+    fullZones = fullZones.map((z) => (z.part_id === pid ? { ...z, colliders: z.colliders.filter((_, ci) => ci !== i) } : z));
+    if (fullSel && fullSel.kind === 'collider' && fullSel.part_id === pid) {
+      if (fullSel.idx === i) fullSel = null;
+      else if (fullSel.idx > i) fullSel = { kind: 'collider', part_id: pid, idx: fullSel.idx - 1 };
+    }
+    clearFullNewRowsFor('collider', pid);
+    persistFullForActive();
+  }
+
+  function onFullColliderText(part_id: string, idx: number, next: string) {
+    const pid = String(part_id || '');
+    const i = clampInt(idx, 0, 999999);
+    const v = String(next ?? '');
+    fullZones = fullZones.map((z) => (z.part_id === pid ? { ...z, colliders: z.colliders.map((c, ci) => (ci === i ? v : c)) } : z));
+    clearFullRowNew('collider', pid, i);
+    persistFullForActive();
+  }
+
+  async function onFullTreePick(kind: 'debris' | 'collider', part_id: string, idx: number) {
+    const pid = String(part_id || '');
+    if (!pid || idx < 0) return;
+    const meta = await pickXobMetaFromDialog();
+    if (!meta) return;
+
+    if (kind === 'debris') {
+      fullZones = fullZones.map((z) =>
+        z.part_id === pid
+          ? { ...z, debris: z.debris.map((d, i) => (i === idx ? { guid: meta.guid, path: meta.path } : d)) }
+          : z
+      );
+      clearFullRowNew('debris', pid, idx);
+      fullSel = { kind: 'debris', part_id: pid, idx };
+    } else {
+      fullZones = fullZones.map((z) => (z.part_id === pid ? { ...z, colliders: z.colliders.map((c, i) => (i === idx ? meta.path : c)) } : z));
+      clearFullRowNew('collider', pid, idx);
+      fullSel = { kind: 'collider', part_id: pid, idx };
+    }
+    persistFullForActive();
   }
 
   async function scanDst() {
@@ -985,6 +1167,7 @@
       </div>
       <div class="right">
         <button class="btn" type="button" onclick={scanFullDst} disabled={isBuilding || modelFiles.length === 0}>Scan full dst</button>
+        <button class="btn" type="button" onclick={addFullZone} disabled={isBuilding || fullZones.length >= 26}>+ Zone</button>
       </div>
     </div>
 
@@ -992,6 +1175,7 @@
       <div class="tree-row header" aria-hidden="true">
         <div class="col name"><strong>item</strong></div>
         <div class="col path"><strong>value</strong></div>
+        <div class="col actions"><strong></strong></div>
       </div>
       <div
         class="tree-row level-0 {fullSel && fullSel.kind==='base' ? 'sel' : ''}"
@@ -1003,6 +1187,7 @@
       >
         <div class="col name">Building {fullBaseGuid ? `{${fullBaseGuid}}` : '{ }'}</div>
         <div class="col path">{fullBasePath || '(not found)'}</div>
+        <div class="col actions"></div>
       </div>
       <div
         class="tree-row level-0 {fullSel && fullSel.kind==='v2' ? 'sel' : ''}"
@@ -1014,6 +1199,7 @@
       >
         <div class="col name">Building ruin (v2_dst) {fullV2Guid ? `{${fullV2Guid}}` : '{ }'}</div>
         <div class="col path">{fullV2Path || '(not found)'}</div>
+        <div class="col actions"></div>
       </div>
 
       {#each fullZones as z (z.part_id)}
@@ -1035,9 +1221,21 @@
             >
               {isFullZoneExpanded(z.part_id) ? '▾' : '▸'}
             </button>
+            {#if isFullRowNew('zone', z.part_id)}
+              <span class="folder-ico" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                </svg>
+              </span>
+            {/if}
             Zone {z.part_id}
           </div>
           <div class="col path">debris: {z.debris.length}, collider: {z.colliders.length}</div>
+          <div class="col actions">
+            <button class="icon-btn" type="button" title="Add Zone" onclick={(e) => { e.stopPropagation(); addFullZone(); }} disabled={isBuilding || fullZones.length >= 26}>+</button>
+            <button class="icon-btn" type="button" title="Remove Zone" onclick={(e) => { e.stopPropagation(); removeFullZone(z.part_id); }} disabled={isBuilding || fullZones.length <= 1}>-</button>
+            <button class="icon-btn danger" type="button" title="Delete Zone" onclick={(e) => { e.stopPropagation(); removeFullZone(z.part_id); }} disabled={isBuilding || fullZones.length <= 1}>Del</button>
+          </div>
         </div>
 
         {#if isFullZoneExpanded(z.part_id)}
@@ -1063,6 +1261,10 @@
               Debris
             </div>
             <div class="col path">{z.debris.length}</div>
+            <div class="col actions">
+              <button class="icon-btn" type="button" title="Add Debris" onclick={(e) => { e.stopPropagation(); addFullDebris(z.part_id); }} disabled={isBuilding}>+</button>
+              <button class="icon-btn" type="button" title="Remove Debris" onclick={(e) => { e.stopPropagation(); removeFullDebris(z.part_id); }} disabled={isBuilding || z.debris.length === 0}>-</button>
+            </div>
           </div>
 
           {#if isFullCatExpanded(z.part_id, 'debris')}
@@ -1074,9 +1276,24 @@
                 aria-selected={!!(fullSel && fullSel.kind==='debris' && fullSel.part_id===z.part_id && fullSel.idx===i)}
                 onclick={() => (fullSel = { kind: 'debris', part_id: z.part_id, idx: i })}
                 onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'debris', part_id: z.part_id, idx: i }; } }}
+                ondblclick={() => onFullTreePick('debris', z.part_id, i)}
               >
-                <div class="col name">debris dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}</div>
+                <div class="col name">
+                  {#if isFullRowNew('debris', z.part_id, i) || (!db.path && !db.guid)}
+                    <button class="folder-btn" type="button" title="Pick file" onclick={(e) => { e.stopPropagation(); onFullTreePick('debris', z.part_id, i); }}>
+                      <span class="folder-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                        </svg>
+                      </span>
+                    </button>
+                  {/if}
+                  debris dbr_{String(i + 1).padStart(2, '0')} {db.guid ? `{${db.guid}}` : '{ }'}
+                </div>
                 <div class="col path">{db.path}</div>
+                <div class="col actions">
+                  <button class="icon-btn danger" type="button" title="Delete" onclick={(e) => { e.stopPropagation(); removeFullDebrisAt(z.part_id, i); }} disabled={isBuilding}>Del</button>
+                </div>
               </div>
             {/each}
           {/if}
@@ -1103,6 +1320,10 @@
               Colliders
             </div>
             <div class="col path">{z.colliders.length}</div>
+            <div class="col actions">
+              <button class="icon-btn" type="button" title="Add Collider" onclick={(e) => { e.stopPropagation(); addFullCollider(z.part_id); }} disabled={isBuilding}>+</button>
+              <button class="icon-btn" type="button" title="Remove Collider" onclick={(e) => { e.stopPropagation(); removeFullCollider(z.part_id); }} disabled={isBuilding || z.colliders.length === 0}>-</button>
+            </div>
           </div>
 
           {#if isFullCatExpanded(z.part_id, 'colliders')}
@@ -1116,7 +1337,20 @@
                 onkeydown={(e) => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fullSel = { kind: 'collider', part_id: z.part_id, idx: j }; } }}
               >
                 <div class="col name">collider {j + 1}</div>
-                <div class="col path">{c}</div>
+                <div class="col path">
+                  <input
+                    class="inline-input"
+                    type="text"
+                    value={c}
+                    placeholder="Collider text..."
+                    disabled={isBuilding}
+                    onfocus={() => (fullSel = { kind: 'collider', part_id: z.part_id, idx: j })}
+                    oninput={(e) => onFullColliderText(z.part_id, j, (e.currentTarget as HTMLInputElement).value)}
+                  />
+                </div>
+                <div class="col actions">
+                  <button class="icon-btn danger" type="button" title="Delete" onclick={(e) => { e.stopPropagation(); removeFullColliderAt(z.part_id, j); }} disabled={isBuilding}>Del</button>
+                </div>
               </div>
             {/each}
           {/if}
@@ -1540,7 +1774,7 @@
   }
   .scr-tree .tree-row {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 320px 1fr 150px;
     gap: 8px;
     padding: 8px 10px;
     border-top: 1px solid rgba(255,255,255,0.06);
@@ -1551,6 +1785,84 @@
   .scr-tree .tree-row.sel { background: rgba(59,130,246,0.15); }
   .scr-tree .col.name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .scr-tree .col.path { opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .scr-tree .col.actions { display: flex; justify-content: end; gap: 6px; }
+
+  .icon-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.92);
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    font-size: 12px;
+  }
+
+  .icon-btn.danger {
+    border-color: rgba(248, 113, 113, 0.35);
+    background: rgba(248, 113, 113, 0.12);
+  }
+
+  .icon-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  :global(body.theme-light) .icon-btn {
+    background: rgba(17, 17, 17, 0.05);
+    border-color: rgba(17, 17, 17, 0.14);
+    color: rgba(17, 17, 17, 0.9);
+  }
+
+  :global(body.theme-light) .icon-btn.danger {
+    border-color: rgba(220, 38, 38, 0.35);
+    background: rgba(220, 38, 38, 0.10);
+  }
+
+  .folder-btn {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    margin-right: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.9;
+  }
+
+  .folder-btn:hover { opacity: 1; }
+
+  .folder-ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 6px;
+    opacity: 0.9;
+  }
+
+  .inline-input {
+    width: 100%;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(0, 0, 0, 0.18);
+    padding: 0 10px;
+    color: rgba(255, 255, 255, 0.90);
+    outline: none;
+  }
+
+  :global(body.theme-light) .inline-input {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(17, 17, 17, 0.14);
+    color: rgba(17, 17, 17, 0.90);
+  }
 
   @media (max-width: 720px) {
     .row {
