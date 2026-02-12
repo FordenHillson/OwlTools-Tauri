@@ -40,17 +40,17 @@ struct ScanLogPayload {
     total: Option<usize>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct MetaEntry { guid: String, path: String }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FullDstZoneInfo {
     part_id: String,
     debris: Vec<MetaEntry>,
     colliders: Vec<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct FullDstScanResult {
     base_guid: String,
     base_path: String,
@@ -219,7 +219,8 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
     let mut debris_by_part: BTreeMap<String, Vec<(i32, MetaEntry)>> = BTreeMap::new();
     if let Some(dst_dir) = find_dst_directory(&xob_abs) {
         let rx = Regex::new(&format!(
-            r"(?i)^(?:{}_V2_dst|{}_FDST)_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$",
+            r"(?i)^(?:{}_V2_dst|{}_V2_dst_FDST|{}_FDST)_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$",
+            regex::escape(stem),
             regex::escape(stem),
             regex::escape(stem)
         )).unwrap();
@@ -1804,6 +1805,7 @@ async fn prefabdst_build(
     model_files: Vec<String>,
     save_folder: String,
     scr_override: Option<ScrDstScanResult>,
+    full_override: Option<HashMap<String, FullDstScanResult>>,
 ) -> Result<PrefabDstBuildResult, String> {
     let zones = zones.clamp(1, 26);
     let hp_zone = hp_zone.clamp(1, 9999);
@@ -1848,32 +1850,50 @@ async fn prefabdst_build(
         let gen_key = hdr.generator.trim().to_lowercase();
         emit_prefabdst_log(&app, "info", format!("Generator: {}", if gen_key.is_empty() { "(unknown)" } else { &gen_key }), Some(cur), Some(total));
 
-        // For zone_fractal presets, auto-detect the number of zones from GeometryParam part tags (A-Z)
-        // via the same scan used for debris/collider marker replacement.
+        // For zone_fractal presets, determine per-file scan/override for debris/colliders marker replacement.
+        // If UI provided overrides, prefer those instead of re-scanning.
         let mut full_scan: Option<FullDstScanResult> = None;
         let mut zones_for_this_file = zones;
         if gen_key != "template" {
-            match prefabdst_scan_full_dst(xob_path.to_string()).await {
-                Ok(scan) => {
-                    let inferred = scan.zones.len().clamp(1, 26);
+            if let Some(map) = full_override.as_ref() {
+                if let Some(ov) = map.get(xob_path) {
+                    let inferred = ov.zones.len().clamp(1, 26);
                     zones_for_this_file = inferred;
-                    full_scan = Some(scan);
+                    full_scan = Some(ov.clone());
                     emit_prefabdst_log(
                         &app,
                         "info",
-                        format!("Auto zones: {} (from GeometryParam tags)", inferred),
+                        format!("Zones: {} (from UI override)", inferred),
                         Some(cur),
                         Some(total)
                     );
                 }
-                Err(e) => {
-                    emit_prefabdst_log(
-                        &app,
-                        "warn",
-                        format!("Auto zones skipped (full dst scan failed): {}", e),
-                        Some(cur),
-                        Some(total)
-                    );
+            }
+
+            if full_scan.is_none() {
+                // Fallback: auto-scan from base xob if no override was provided.
+                match prefabdst_scan_full_dst(xob_path.to_string()).await {
+                    Ok(scan) => {
+                        let inferred = scan.zones.len().clamp(1, 26);
+                        zones_for_this_file = inferred;
+                        full_scan = Some(scan);
+                        emit_prefabdst_log(
+                            &app,
+                            "info",
+                            format!("Auto zones: {} (from GeometryParam tags)", inferred),
+                            Some(cur),
+                            Some(total)
+                        );
+                    }
+                    Err(e) => {
+                        emit_prefabdst_log(
+                            &app,
+                            "warn",
+                            format!("Auto zones skipped (full dst scan failed): {}", e),
+                            Some(cur),
+                            Some(total)
+                        );
+                    }
                 }
             }
         }

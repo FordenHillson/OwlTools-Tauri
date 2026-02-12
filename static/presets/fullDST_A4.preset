@@ -12,7 +12,6 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
   }
   RigidBody "{506EDA9CBE1B57FF}" {
    ModelGeometry 1
-   Static 1
   }
   WB_SlotBoneMappingsComponent "{61A49EE0539CF4E7}" {
    SlotBoneMappings {
@@ -45,13 +44,6 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
     }
    }
    DamagePhases {
-    FractalPartDestructionPhase "{gen guid}" {
-     PhaseDestroyEffects {
-      SCR_ParticleEffect "{gen guid}" {
-       m_Particle "{70D6B6836428988B}Particles/Effects/Destruction/Explosion/Explosion_RPL5.ptc"
-      }
-     }
-    }
    }
    LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
     PhaseStartEffects {
@@ -89,13 +81,6 @@ FractalDestructibleEntity : "{629F15955AD7460C}Prefabs/Structures/Core/Building_
     }
    }
    DamagePhases {
-    FractalPartDestructionPhase "{gen guid}" {
-     PhaseDestroyEffects {
-      SCR_ParticleEffect "{gen guid}" {
-       m_Particle "{70D6B6836428988B}Particles/Effects/Destruction/Explosion/Explosion_RPL5.ptc"
-      }
-     }
-    }
    }
    LastDestructionPhase FractalPartDestructionPhase "{gen guid}" {
     PhaseStartEffects {

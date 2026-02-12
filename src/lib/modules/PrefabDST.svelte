@@ -1002,7 +1002,8 @@
             debrisMass: debrisMass,
             modelFiles: [f],
             saveFolder: saveFolder,
-            scrOverride: per
+            scrOverride: per,
+            fullOverride: fullByFile
           });
           const out = (res && Array.isArray((res as any).out_paths)) ? ((res as any).out_paths as string[]) : [];
           allOut.push(...out);
@@ -1016,7 +1017,8 @@
           debrisMass: debrisMass,
           modelFiles: modelFiles,
           saveFolder: saveFolder,
-          scrOverride
+          scrOverride,
+          fullOverride: fullByFile
         });
         const out = (res && Array.isArray((res as any).out_paths)) ? ((res as any).out_paths as string[]) : [];
         allOut.push(...out);
