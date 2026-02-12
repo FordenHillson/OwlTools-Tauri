@@ -219,7 +219,7 @@ async fn prefabdst_scan_full_dst(xob_path: String) -> Result<FullDstScanResult, 
     let mut debris_by_part: BTreeMap<String, Vec<(i32, MetaEntry)>> = BTreeMap::new();
     if let Some(dst_dir) = find_dst_directory(&xob_abs) {
         let rx = Regex::new(&format!(
-            r"(?i)^(?:{}_V2_dst|{}_V2_dst_FDST|{}_v2_FDST_dst|{}_FDST)_ID-(?P<p>[A-Z])_dbr_(?P<d>\d+)\.xob$",
+            r"(?i)^(?:{}_V2_dst|{}_V2_dst_FDST|{}_v2_FDST_dst|{}_FDST)_ID-(?P<p>[A-Z])(?:_VIS-[^_]+)?_dbr_(?P<d>\d+)\.xob$",
             regex::escape(stem),
             regex::escape(stem),
             regex::escape(stem),
