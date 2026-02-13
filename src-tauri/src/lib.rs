@@ -3148,6 +3148,133 @@ struct PrefabScanResult {
     cache_path: String,
 }
 
+fn cached_prefab_status() -> PrefabCacheStatus {
+    let path = prefab_index_path();
+    if let Ok(text) = fs::read_to_string(&path) {
+        if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+            let generated = value
+                .get("generated")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let svn_root = value
+                .get("svn_root")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let prefab_count = value
+                .get("prefabs")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .or_else(|| value.get("name_index").and_then(|v| v.as_object()).map(|o| o.len()))
+                .unwrap_or(0);
+            return PrefabCacheStatus {
+                has_cache: true,
+                cache_path: Some(path.to_string_lossy().to_string()),
+                svn_root,
+                generated,
+                prefab_count,
+            };
+        }
+    }
+    PrefabCacheStatus::default()
+}
+
+fn detect_svn_candidates() -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home_dir() {
+        bases.push(home.clone());
+        for sub in ["Documents", "Desktop", "Downloads", "Projects", "Project", "Work", "Workspace"] {
+            let cand = home.join(sub);
+            if cand.is_dir() {
+                bases.push(cand);
+            }
+        }
+    }
+    if let Some(docs) = document_dir() {
+        bases.push(docs);
+    }
+    if let Ok(env) = std::env::var("SVN_ROOT") {
+        let pb = PathBuf::from(env);
+        if pb.is_dir() {
+            bases.push(pb);
+        }
+    }
+    for drv in 'A'..='Z' {
+        let root = format!("{}:\\", drv);
+        let pb = PathBuf::from(&root);
+        if pb.is_dir() {
+            bases.push(pb);
+        }
+    }
+    bases
+}
+
+fn find_svn_in_base(base: &Path, max_entries: usize) -> Option<PathBuf> {
+    if !base.is_dir() {
+        return None;
+    }
+    let mut seen = 0usize;
+    for entry in WalkDir::new(base)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.eq_ignore_ascii_case("svn") {
+            return Some(entry.into_path());
+        }
+        seen += 1;
+        if seen >= max_entries {
+            break;
+        }
+    }
+    None
+}
+
+fn auto_detect_svn_blocking() -> Option<PathBuf> {
+    let settings = load_settings();
+    if let Some(ref stored) = settings.svn_root {
+        let pb = PathBuf::from(stored);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let cache = cached_prefab_status();
+    if let Some(ref cached) = cache.svn_root {
+        let pb = PathBuf::from(cached);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let mut visited = HashSet::new();
+    for base in detect_svn_candidates() {
+        let canonical = base.clone();
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        if let Some(found) = find_svn_in_base(&base, 10_000) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn read_meta_name_field(meta_path: &Path) -> Option<String> {
+    if !meta_path.is_file() {
+        return None;
+    }
+    fs::read_to_string(meta_path).ok().and_then(|text| {
+        let needle = "Name \"";
+        let idx = text.find(needle)?;
+        let rest = &text[idx + needle.len()..];
+        let end_idx = rest.find('"')?;
+        Some(rest[..end_idx].trim().to_string())
+    })
+}
+
 #[tauri::command]
 fn remember_svn_root(path: Option<String>) -> Result<(), String> {
     let mut settings = load_settings();
@@ -3162,7 +3289,7 @@ fn get_prefab_cache_status() -> Result<PrefabCacheStatus, String> {
 
 #[tauri::command]
 async fn auto_detect_svn_root() -> Result<Option<String>, String> {
-    let detected = tauri::async_runtime::spawn_blocking(|| auto_detect_svn_blocking())
+    let detected: Option<PathBuf> = tauri::async_runtime::spawn_blocking(|| auto_detect_svn_blocking())
         .await
         .map_err(|e| e.to_string())?;
     if let Some(path) = detected {
