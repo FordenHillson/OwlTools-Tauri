@@ -379,16 +379,6 @@ fn find_dst_directory(xob_abs: &Path) -> Option<PathBuf> {
     None
 }
 
-fn format_blender_spawn_error(e: std::io::Error) -> String {
-    match e.raw_os_error() {
-        Some(740) => {
-            "Blender requires elevation (Windows UAC) (os error 740).\n\nThe Blender executable you selected is marked 'Run as administrator' or has a manifest requiring admin rights. OwlTools launches Blender headless to capture output, and cannot proceed if Blender needs elevation.\n\nFix:\n- Select a different Blender build that does NOT require admin (official portable/zip or normal installer).\n- Or disable 'Run this program as an administrator' in blender.exe Properties -> Compatibility."
-                .to_string()
-        }
-        _ => format!("{}", e),
-    }
-}
-
 fn scan_dst_for_phases_debris(base_xob_abs: &Path) -> (Vec<(String, (String, String))>, std::collections::HashMap<String, Vec<(String, String)>>) {
     let mut phases: Vec<(String, (String, String))> = Vec::new();
     let mut debris: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
@@ -2730,28 +2720,80 @@ print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
         , asset_type_norm
     );
 
-    let out = std::process::Command::new(blender)
-        .args(["--background", "--factory-startup", "--python-expr", &py])
-        .output()
-        .map_err(|e| format!("Failed to run Blender: {}", format_blender_spawn_error(e)))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let mut json_line: Option<String> = None;
-    for line in stdout.lines().rev() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("OWLTOOLS_MQA_JSON=") {
-            json_line = Some(rest.to_string());
-            break;
+    let tail_lines = |s: &str, max_lines: usize| -> String {
+        let lines: Vec<&str> = s.lines().collect();
+        if lines.len() <= max_lines {
+            return s.trim().to_string();
         }
+        lines[lines.len().saturating_sub(max_lines)..]
+            .join("\n")
+            .trim()
+            .to_string()
+    };
+
+    let find_json_line = |stdout: &str| -> Option<String> {
+        for line in stdout.lines().rev() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("OWLTOOLS_MQA_JSON=") {
+                return Some(rest.to_string());
+            }
+        }
+        None
+    };
+
+    let run_blender = |args: &[&str]| -> Result<std::process::Output, String> {
+        std::process::Command::new(&blender)
+            .args(args)
+            .output()
+            .map_err(|e| format!("Failed to run Blender: {}", e))
+    };
+
+    // First attempt: background mode (preferred), but EBT may require GPU API which Blender disables in background.
+    let mut out = run_blender(&["--background", "--factory-startup", "--python-expr", &py])?;
+
+    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let mut json_line = find_json_line(&stdout);
+    if json_line.is_none()
+        && (stderr.contains("GPU functions for drawing are not available in background mode")
+            || stdout.contains("GPU functions for drawing are not available in background mode"))
+    {
+        // Retry without --background so GPU-dependent parts can run.
+        out = run_blender(&["--factory-startup", "--python-expr", &py])?;
+        stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        json_line = find_json_line(&stdout);
     }
+
     let json_line = json_line.ok_or_else(|| {
-        if stderr.trim().is_empty() {
-            "Failed to capture MQA report from Blender".to_string()
+        let status = out
+            .status
+            .code()
+            .map(|c| format!("exit code {}", c))
+            .unwrap_or_else(|| "terminated".to_string());
+        let stderr_tail = tail_lines(&stderr, 80);
+        let stdout_tail = tail_lines(&stdout, 80);
+        if stderr_tail.is_empty() && stdout_tail.is_empty() {
+            format!("Failed to capture MQA report from Blender ({})", status)
+        } else if stderr_tail.is_empty() {
+            format!(
+                "Failed to capture MQA report from Blender ({})\n--- stdout (tail) ---\n{}",
+                status, stdout_tail
+            )
+        } else if stdout_tail.is_empty() {
+            format!(
+                "Failed to capture MQA report from Blender ({})\n--- stderr (tail) ---\n{}",
+                status, stderr_tail
+            )
         } else {
-            format!("Failed to capture MQA report from Blender: {}", stderr.trim())
+            format!(
+                "Failed to capture MQA report from Blender ({})\n--- stderr (tail) ---\n{}\n--- stdout (tail) ---\n{}",
+                status, stderr_tail, stdout_tail
+            )
         }
     })?;
+
     serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
 }
 
@@ -2832,9 +2874,136 @@ except Exception:
      std::process::Command::new(blender)
          .args(["--factory-startup", "--python-expr", &py])
          .spawn()
-         .map_err(|e| format!("Failed to launch Blender: {}", format_blender_spawn_error(e)))?;
+         .map_err(|e| format!("Failed to launch Blender: {}", e))?;
      Ok(())
  }
+
+fn cached_prefab_status() -> PrefabCacheStatus {
+    let path = prefab_index_path();
+    if let Ok(text) = fs::read_to_string(&path) {
+        if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
+            let generated = value
+                .get("generated")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let svn_root = value
+                .get("svn_root")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let prefab_count = value
+                .get("prefabs")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .or_else(|| value.get("name_index").and_then(|v| v.as_object()).map(|o| o.len()))
+                .unwrap_or(0);
+            return PrefabCacheStatus {
+                has_cache: true,
+                cache_path: Some(path.to_string_lossy().to_string()),
+                svn_root,
+                generated,
+                prefab_count,
+            };
+        }
+    }
+    PrefabCacheStatus::default()
+}
+
+fn detect_svn_candidates() -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home_dir() {
+        bases.push(home.clone());
+        for sub in ["Documents", "Desktop", "Downloads", "Projects", "Project", "Work", "Workspace"] {
+            let cand = home.join(sub);
+            if cand.is_dir() {
+                bases.push(cand);
+            }
+        }
+    }
+    if let Some(docs) = document_dir() {
+        bases.push(docs);
+    }
+    if let Ok(env) = std::env::var("SVN_ROOT") {
+        let pb = PathBuf::from(env);
+        if pb.is_dir() {
+            bases.push(pb);
+        }
+    }
+    for drv in 'A'..='Z' {
+        let root = format!("{}:\\", drv);
+        let pb = PathBuf::from(&root);
+        if pb.is_dir() {
+            bases.push(pb);
+        }
+    }
+    bases
+}
+
+fn find_svn_in_base(base: &Path, max_entries: usize) -> Option<PathBuf> {
+    if !base.is_dir() {
+        return None;
+    }
+    let mut seen = 0usize;
+    for entry in WalkDir::new(base)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.eq_ignore_ascii_case("svn") {
+            return Some(entry.into_path());
+        }
+        seen += 1;
+        if seen >= max_entries {
+            break;
+        }
+    }
+    None
+}
+
+fn auto_detect_svn_blocking() -> Option<PathBuf> {
+    let settings = load_settings();
+    if let Some(ref stored) = settings.svn_root {
+        let pb = PathBuf::from(stored);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let cache = cached_prefab_status();
+    if let Some(ref cached) = cache.svn_root {
+        let pb = PathBuf::from(cached);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let mut visited = HashSet::new();
+    for base in detect_svn_candidates() {
+        let canonical = base.clone();
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        if let Some(found) = find_svn_in_base(&base, 10_000) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn read_meta_name_field(meta_path: &Path) -> Option<String> {
+    if !meta_path.is_file() {
+        return None;
+    }
+    fs::read_to_string(meta_path).ok().and_then(|text| {
+        let needle = "Name \"";
+        let idx = text.find(needle)?;
+        let rest = &text[idx + needle.len()..];
+        let end_idx = rest.find('"')?;
+        Some(rest[..end_idx].trim().to_string())
+    })
+}
 
 fn extract_guid(name_value: &str) -> Option<String> {
     let trimmed = name_value.trim_start();
@@ -3148,133 +3317,6 @@ struct PrefabScanResult {
     cache_path: String,
 }
 
-fn cached_prefab_status() -> PrefabCacheStatus {
-    let path = prefab_index_path();
-    if let Ok(text) = fs::read_to_string(&path) {
-        if let Ok(value) = serde_json::from_str::<JsonValue>(&text) {
-            let generated = value
-                .get("generated")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let svn_root = value
-                .get("svn_root")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let prefab_count = value
-                .get("prefabs")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .or_else(|| value.get("name_index").and_then(|v| v.as_object()).map(|o| o.len()))
-                .unwrap_or(0);
-            return PrefabCacheStatus {
-                has_cache: true,
-                cache_path: Some(path.to_string_lossy().to_string()),
-                svn_root,
-                generated,
-                prefab_count,
-            };
-        }
-    }
-    PrefabCacheStatus::default()
-}
-
-fn detect_svn_candidates() -> Vec<PathBuf> {
-    let mut bases: Vec<PathBuf> = Vec::new();
-    if let Some(home) = home_dir() {
-        bases.push(home.clone());
-        for sub in ["Documents", "Desktop", "Downloads", "Projects", "Project", "Work", "Workspace"] {
-            let cand = home.join(sub);
-            if cand.is_dir() {
-                bases.push(cand);
-            }
-        }
-    }
-    if let Some(docs) = document_dir() {
-        bases.push(docs);
-    }
-    if let Ok(env) = std::env::var("SVN_ROOT") {
-        let pb = PathBuf::from(env);
-        if pb.is_dir() {
-            bases.push(pb);
-        }
-    }
-    for drv in 'A'..='Z' {
-        let root = format!("{}:\\", drv);
-        let pb = PathBuf::from(&root);
-        if pb.is_dir() {
-            bases.push(pb);
-        }
-    }
-    bases
-}
-
-fn find_svn_in_base(base: &Path, max_entries: usize) -> Option<PathBuf> {
-    if !base.is_dir() {
-        return None;
-    }
-    let mut seen = 0usize;
-    for entry in WalkDir::new(base)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy();
-        if name.eq_ignore_ascii_case("svn") {
-            return Some(entry.into_path());
-        }
-        seen += 1;
-        if seen >= max_entries {
-            break;
-        }
-    }
-    None
-}
-
-fn auto_detect_svn_blocking() -> Option<PathBuf> {
-    let settings = load_settings();
-    if let Some(ref stored) = settings.svn_root {
-        let pb = PathBuf::from(stored);
-        if pb.is_dir() {
-            return Some(pb);
-        }
-    }
-    let cache = cached_prefab_status();
-    if let Some(ref cached) = cache.svn_root {
-        let pb = PathBuf::from(cached);
-        if pb.is_dir() {
-            return Some(pb);
-        }
-    }
-    let mut visited = HashSet::new();
-    for base in detect_svn_candidates() {
-        let canonical = base.clone();
-        if !visited.insert(canonical.clone()) {
-            continue;
-        }
-        if let Some(found) = find_svn_in_base(&base, 10_000) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn read_meta_name_field(meta_path: &Path) -> Option<String> {
-    if !meta_path.is_file() {
-        return None;
-    }
-    fs::read_to_string(meta_path).ok().and_then(|text| {
-        let needle = "Name \"";
-        let idx = text.find(needle)?;
-        let rest = &text[idx + needle.len()..];
-        let end_idx = rest.find('"')?;
-        Some(rest[..end_idx].trim().to_string())
-    })
-}
-
 #[tauri::command]
 fn remember_svn_root(path: Option<String>) -> Result<(), String> {
     let mut settings = load_settings();
@@ -3289,7 +3331,7 @@ fn get_prefab_cache_status() -> Result<PrefabCacheStatus, String> {
 
 #[tauri::command]
 async fn auto_detect_svn_root() -> Result<Option<String>, String> {
-    let detected: Option<PathBuf> = tauri::async_runtime::spawn_blocking(|| auto_detect_svn_blocking())
+    let detected = tauri::async_runtime::spawn_blocking(|| auto_detect_svn_blocking())
         .await
         .map_err(|e| e.to_string())?;
     if let Some(path) = detected {

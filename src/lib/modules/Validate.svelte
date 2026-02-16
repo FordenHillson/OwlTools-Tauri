@@ -5,8 +5,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
-  let selectedFilePath = '';
-  let selectedFileName = '';
+  let selectedFilePaths: string[] = [];
   let isDragOver = false;
   let dragDepth = 0;
   let dropZoneEl: HTMLElement | null = null;
@@ -29,6 +28,9 @@
   let workbenchPort = 5700;
   let showMqaPopup = false;
   let mqaReport: any = null;
+  let mqaBatchResults: { xobPath: string; report: any; ok: boolean; error?: string }[] = [];
+  let mqaSelectedResultIndex = 0;
+  let mqaViewMode: 'by_file' | 'by_error' = 'by_file';
   let mqaCategoryFilter = 'All';
   let mqaMessageFilter = 'All';
   let lastMqaCategoryFilter = mqaCategoryFilter;
@@ -43,6 +45,24 @@
   let configLoaded = false;
   $: isConfigReady = !!(blenderPath && ebtAddonsDir);
   $: isValidateLocked = configLoaded && !isConfigReady;
+
+  $: selectedFileNames = selectedFilePaths.map((p) => p.split(/[\\/]/).pop() ?? p);
+  $: selectedPrimaryPath = selectedFilePaths[0] ?? '';
+  $: selectedPrimaryName = selectedPrimaryPath ? (selectedPrimaryPath.split(/[\\/]/).pop() ?? selectedPrimaryPath) : '';
+
+  const toFolderPath = (p: any) => {
+    const s = String(p ?? '').trim();
+    if (!s) return '';
+    return s.replace(/[\\/][^\\/]*$/, '');
+  };
+
+  $: mqaFbxHeaderValue = (() => {
+    const fbx = (mqaReport?.fbx ?? '') as any;
+    if (mqaViewMode === 'by_error') {
+      return toFolderPath(fbx);
+    }
+    return String(fbx ?? '');
+  })();
 
   const normalizeMqaMessage = (msg: string) => {
     let t = String(msg ?? '').trim();
@@ -104,6 +124,63 @@
   }
 
   $: mqaItems = Array.isArray(mqaReport?.items) ? mqaReport.items : [];
+
+  $: mqaGroupedErrors = (() => {
+    const byKey = new Map<
+      string,
+      {
+        category: string;
+        message: string;
+        files: { xobPath: string; fileName: string; objects: string[] }[];
+      }
+    >();
+
+    for (const r of mqaBatchResults) {
+      const rep = r?.report;
+      const items = Array.isArray(rep?.items) ? rep.items : [];
+      const fileName = String(r?.xobPath ?? '').split(/[\\/]/).pop() ?? String(r?.xobPath ?? '');
+
+      for (const it of items) {
+        const cat = String(it?.category ?? '').trim() || 'Unknown';
+        const msg = String(it?.message ?? '').trim() || 'Unknown';
+        const k = `${cat}::${msg}`;
+
+        const objsRaw = Array.isArray(it?.objects) ? it.objects : [];
+        const objs = objsRaw
+          .map((o: any) => String(o ?? '').trim())
+          .filter((s: string) => !!s);
+
+        let g = byKey.get(k);
+        if (!g) {
+          g = { category: cat, message: msg, files: [] };
+          byKey.set(k, g);
+        }
+
+        let f = g.files.find((x) => x.xobPath === r.xobPath);
+        if (!f) {
+          f = { xobPath: r.xobPath, fileName, objects: [] };
+          g.files.push(f);
+        }
+
+        for (const o of objs) {
+          if (!f.objects.includes(o)) f.objects.push(o);
+        }
+      }
+    }
+
+    const groups = Array.from(byKey.values());
+    groups.sort((a, b) => {
+      if (a.category !== b.category) return a.category.localeCompare(b.category);
+      return a.message.localeCompare(b.message);
+    });
+    for (const g of groups) {
+      g.files.sort((a, b) => a.fileName.localeCompare(b.fileName));
+      for (const f of g.files) {
+        f.objects.sort((a, b) => a.localeCompare(b));
+      }
+    }
+    return groups;
+  })();
   $: mqaCategoryCounts = (() => {
     const m = new Map<string, number>();
     for (const it of mqaItems) {
@@ -184,12 +261,8 @@
       return;
     }
     checkAllMessage = '';
-    if (!selectedFilePath) {
+    if (!selectedFilePaths.length) {
       checkAllMessage = 'Please select .xob file first';
-      return;
-    }
-    if (!selectedFilePath.toLowerCase().endsWith('.xob')) {
-      checkAllMessage = 'Selected file must be .xob';
       return;
     }
     try {
@@ -210,18 +283,41 @@
       }, 500);
 
       const mqaAssetType = assetType === 'Building' ? 'BUILDINGS' : 'GENERIC';
-      const res = await invoke<any>('mqa_report_from_xob', {
-        xobPath: selectedFilePath,
-        workbenchPort,
-        assetType: mqaAssetType
-      });
+
+      const xobs = selectedFilePaths.filter((p) => p.toLowerCase().endsWith('.xob'));
+      if (!xobs.length) {
+        checkAllMessage = 'Selected files must be .xob';
+        mqaLoadingStatus = 'Failed';
+        return;
+      }
+
+      mqaBatchResults = [];
+      for (let i = 0; i < xobs.length; i++) {
+        const xobPath = xobs[i];
+        const name = xobPath.split(/[\\/]/).pop() ?? xobPath;
+        mqaLoadingStatus = `Running MQA (${i + 1}/${xobs.length}): ${name}`;
+        try {
+          const res = await invoke<any>('mqa_report_from_xob', {
+            xobPath,
+            workbenchPort,
+            assetType: mqaAssetType
+          });
+          mqaBatchResults.push({ xobPath, report: res, ok: true });
+        } catch (e: any) {
+          const msg = String(e?.message || e || 'Failed');
+          mqaBatchResults.push({ xobPath, report: { items: [], errors: [msg] }, ok: false, error: msg });
+        }
+      }
 
       mqaLoadingStatus = 'Processing report...';
-      mqaReport = res;
+      mqaSelectedResultIndex = 0;
+      mqaReport = mqaBatchResults[0]?.report ?? null;
+      mqaViewMode = 'by_file';
       mqaCategoryFilter = 'All';
       mqaMessageFilter = 'All';
       showMqaPopup = true;
-      checkAllMessage = 'MQA report generated';
+      const okCount = mqaBatchResults.filter((r) => r.ok).length;
+      checkAllMessage = `MQA completed: ${okCount}/${mqaBatchResults.length} success`;
     } catch (err: any) {
       checkAllMessage = String(err?.message || err || 'Failed to open Blender');
       mqaLoadingStatus = 'Failed';
@@ -242,6 +338,19 @@
 
   function closeMqaPopup() {
     showMqaPopup = false;
+  }
+
+  $: if (showMqaPopup && mqaBatchResults.length) {
+    const idx = Math.max(0, Math.min(mqaBatchResults.length - 1, mqaSelectedResultIndex));
+    if (idx !== mqaSelectedResultIndex) {
+      mqaSelectedResultIndex = idx;
+    }
+    const next = mqaBatchResults[idx]?.report ?? null;
+    if (next !== mqaReport) {
+      mqaReport = next;
+      mqaCategoryFilter = 'All';
+      mqaMessageFilter = 'All';
+    }
   }
 
   function handleBackdropClick(e: MouseEvent) {
@@ -296,16 +405,16 @@
 
   async function openFbxInBlender() {
     configMessage = '';
-    if (!selectedFilePath) {
+    if (!selectedPrimaryPath) {
       configMessage = 'Please select .xob file first';
       return;
     }
-    if (!selectedFilePath.toLowerCase().endsWith('.xob')) {
+    if (!selectedPrimaryPath.toLowerCase().endsWith('.xob')) {
       configMessage = 'Selected file must be .xob';
       return;
     }
     try {
-      await invoke('open_fbx_in_blender', { xobPath: selectedFilePath, workbenchPort });
+      await invoke('open_fbx_in_blender', { xobPath: selectedPrimaryPath, workbenchPort });
       configMessage = 'Opening FBX in Blender...';
     } catch (err: any) {
       configMessage = String(err?.message || err || 'Failed to open FBX');
@@ -409,16 +518,29 @@
     return '';
   }
 
+  function addSelectedPaths(paths: string[]) {
+    const seen = new Set(selectedFilePaths.map((p) => p.toLowerCase()));
+    const merged = [...selectedFilePaths];
+    for (const p of paths) {
+      const t = String(p ?? '').trim();
+      if (!t) continue;
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(t);
+    }
+    selectedFilePaths = merged;
+  }
+
   function applyDroppedPath(raw: string) {
     if (!raw) return;
-    selectedFilePath = raw;
-    selectedFileName = raw.split(/[\\/]/).pop() ?? raw;
+    addSelectedPaths([raw]);
   }
 
   async function pickFile() {
     try {
       const selection = await open({
-        multiple: false,
+        multiple: true,
         filters: [
           { name: 'All Files', extensions: ['*'] },
           { name: 'Text Files', extensions: ['txt', 'log'] },
@@ -427,6 +549,8 @@
       });
       if (typeof selection === 'string' && selection) {
         applyDroppedPath(selection);
+      } else if (Array.isArray(selection)) {
+        addSelectedPaths(selection.filter((p) => typeof p === 'string') as string[]);
       }
     } catch (err) {
       console.error('File selection failed', err);
@@ -470,11 +594,14 @@
     if (!dt) return;
     
     if (dt.files && dt.files.length > 0) {
-      const first = dt.files[0];
-      const path = (first as any)?.path || first.name;
-      if (typeof path === 'string') {
-        applyDroppedPath(path);
+      const paths: string[] = [];
+      for (const f of Array.from(dt.files)) {
+        const path = (f as any)?.path || f.name;
+        if (typeof path === 'string' && path) {
+          paths.push(path);
+        }
       }
+      if (paths.length) addSelectedPaths(paths);
       return;
     }
     
@@ -489,8 +616,7 @@
   }
 
   function clearSelection() {
-    selectedFilePath = '';
-    selectedFileName = '';
+    selectedFilePaths = [];
   }
 
   onMount(() => {
@@ -653,12 +779,14 @@
             on:dragleave={handleDragLeave}
             on:drop={handleDrop}
           >
-            {#if selectedFilePath}
+            {#if selectedPrimaryPath}
               <div class="file-info">
                 <span class="file-icon">📄</span>
                 <div class="file-details">
-                  <div class="file-name">{selectedFileName}</div>
-                  <div class="file-path">{selectedFilePath}</div>
+                  <div class="file-name">
+                    {selectedPrimaryName}{selectedFilePaths.length > 1 ? ` (+${selectedFilePaths.length - 1} more)` : ''}
+                  </div>
+                  <div class="file-path">{selectedPrimaryPath}</div>
                 </div>
               </div>
             {:else}
@@ -673,7 +801,7 @@
             <button class="btn btn-primary" on:click={pickFile}>
               Browse File
             </button>
-            {#if selectedFilePath}
+            {#if selectedPrimaryPath}
               <button class="btn btn-secondary" on:click={clearSelection}>
                 Clear
               </button>
@@ -793,13 +921,73 @@
         <button class="btn btn-secondary modal-close" on:click={closeMqaPopup}>Close</button>
       </div>
       <div class="modal-subtitle">
+        <div class="mqa-filters" style="margin-bottom: 8px;">
+          <button
+            type="button"
+            class="mqa-filter {mqaViewMode === 'by_file' ? 'active' : ''}"
+            on:click={() => (mqaViewMode = 'by_file')}
+          >
+            By File
+          </button>
+          <button
+            type="button"
+            class="mqa-filter {mqaViewMode === 'by_error' ? 'active' : ''}"
+            on:click={() => (mqaViewMode = 'by_error')}
+          >
+            By Error
+          </button>
+        </div>
+
+        {#if mqaBatchResults.length > 1}
+          {#if mqaViewMode === 'by_file'}
+            <div class="asset-type-section" style="margin-bottom: 8px;">
+              <label for="mqa-file">File:</label>
+              <select
+                id="mqa-file"
+                class="asset-type-select"
+                bind:value={mqaSelectedResultIndex}
+              >
+                {#each mqaBatchResults as r, ri (r.xobPath)}
+                  {@const fname = r.xobPath.split(/[\\/]/).pop() ?? r.xobPath}
+                  <option value={ri}>{fname}{r.ok ? '' : ' (failed)'}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+        {/if}
         <div class="modal-meta">
-          <div class="modal-meta-row">FBX: {mqaReport?.fbx ?? ''}</div>
+          <div class="modal-meta-row">FBX: {mqaFbxHeaderValue}</div>
           <div class="modal-meta-row">Items: {mqaReport?.count ?? 0}</div>
         </div>
       </div>
       <div class="modal-body">
-        {#if mqaItems.length}
+        {#if mqaViewMode === 'by_error'}
+          {#if mqaGroupedErrors.length}
+            <div class="mqa-list">
+              {#each mqaGroupedErrors as g, gi (gi)}
+                <div class="mqa-item">
+                  <div class="mqa-line">
+                    <span class="mqa-cat">[{g.category}]</span>
+                    <span class="mqa-msg">{g.message}</span>
+                    <span class="mqa-count">[{g.files.length}]</span>
+                  </div>
+                  <div class="mqa-objects">
+                    {#each g.files as f (f.xobPath)}
+                      <div class="mqa-obj">- {f.fileName}</div>
+                      {#if f.objects.length}
+                        {#each f.objects as o, oi (oi)}
+                          <div class="mqa-obj" style="padding-left: 16px;">- {o}</div>
+                        {/each}
+                      {/if}
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="modal-empty">No reports to display.</div>
+          {/if}
+        {:else if mqaItems.length}
           <div class="mqa-filters">
             <button
               type="button"
