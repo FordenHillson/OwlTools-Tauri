@@ -123,6 +123,57 @@
     }
   }
 
+  async function copyMqaGroup(group: any, key: string) {
+    const cat = String(group?.category ?? '').trim();
+    const msg = String(group?.message ?? '').trim();
+    const files = Array.isArray(group?.files) ? group.files : [];
+
+    const lines: string[] = [];
+    lines.push(`[${cat || 'Unknown'}]`);
+    lines.push(msg || 'Unknown');
+    lines.push(`[${files.length}]`);
+    for (const f of files) {
+      const fn = String(f?.fileName ?? f?.xobPath ?? '').trim();
+      if (fn) lines.push(`- ${fn}`);
+      const objs = Array.isArray(f?.objects) ? f.objects : [];
+      for (const o of objs) {
+        const t = String(o ?? '').trim();
+        if (t) lines.push(`  - ${t}`);
+      }
+    }
+
+    const text = lines.join('\n');
+
+    try {
+      await navigator.clipboard.writeText(text);
+      mqaCopiedKey = key;
+      if (mqaCopiedTimer) clearTimeout(mqaCopiedTimer);
+      mqaCopiedTimer = setTimeout(() => {
+        mqaCopiedKey = null;
+        mqaCopiedTimer = null;
+      }, 1200);
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.top = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        mqaCopiedKey = key;
+        if (mqaCopiedTimer) clearTimeout(mqaCopiedTimer);
+        mqaCopiedTimer = setTimeout(() => {
+          mqaCopiedKey = null;
+          mqaCopiedTimer = null;
+        }, 1200);
+      } catch {}
+    }
+  }
+
   $: mqaItems = Array.isArray(mqaReport?.items) ? mqaReport.items : [];
 
   $: mqaGroupedErrors = (() => {
@@ -965,7 +1016,16 @@
           {#if mqaGroupedErrors.length}
             <div class="mqa-list">
               {#each mqaGroupedErrors as g, gi (gi)}
+                {@const gKey = `g-${gi}`}
                 <div class="mqa-item">
+                  <button
+                    type="button"
+                    class="mqa-copy"
+                    on:click={() => copyMqaGroup(g, gKey)}
+                    title="Copy"
+                  >
+                    {mqaCopiedKey === gKey ? 'Copied' : 'Copy'}
+                  </button>
                   <div class="mqa-line">
                     <span class="mqa-cat">[{g.category}]</span>
                     <span class="mqa-msg">{g.message}</span>
