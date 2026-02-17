@@ -886,8 +886,17 @@ print(json.dumps(data))
         fbx_abs.to_string_lossy()
     );
 
+    let mut script_path = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    script_path.push(format!("owltools_guid_match_{}_{}.py", std::process::id(), ts));
+    let _ = fs::write(&script_path, &py);
+    let script_path_str = script_path.to_string_lossy().to_string();
+
     let out = std::process::Command::new(blender)
-        .args(["--background", "--factory-startup", "--python-expr", &py])
+        .args(["--background", "--factory-startup", "--python", &script_path_str])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -2569,7 +2578,8 @@ fn remember_ebt_addons_dir(path: Option<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn mqa_report_from_xob(
+async fn mqa_report_from_xob(
+    app: tauri::AppHandle,
     xob_path: String,
     workbench_port: Option<u16>,
     asset_type: Option<String>,
@@ -2614,23 +2624,39 @@ fn mqa_report_from_xob(
     };
 
     let py = format!(
-        r#"import sys, pathlib, json
+        r#"import sys, pathlib, json, socket, os
 import bpy
-import addon_utils
+from bpy.props import StringProperty, EnumProperty
+
+try:
+    if not hasattr(bpy.types.Material, 'ebt_enfusion_shader_type'):
+        bpy.types.Material.ebt_enfusion_shader_type = StringProperty()
+    if not hasattr(bpy.types.Material, 'ebt_resource_name'):
+        bpy.types.Material.ebt_resource_name = StringProperty(name='Resource Name', default='', description='Resource name for the material, used for exporting to .xob')
+    if not hasattr(bpy.types.Image, 'ebt_resource_name'):
+        bpy.types.Image.ebt_resource_name = StringProperty(name='Resource Name', default='', description='Resource name for the texture, used for exporting to .xob')
+    if not hasattr(bpy.types.Material, 'Cull'):
+        bpy.types.Material.Cull = EnumProperty(items=[('ccw','ccw','',0), ('none','none','',1)], default='ccw')
+except Exception:
+    pass
+
+socket.setdefaulttimeout(3.0)
+
+def stage(msg):
+    try:
+        print('OWLTOOLS_STAGE=' + str(msg), flush=True)
+    except Exception:
+        pass
 
 debug = {{}}
 errors = []
 
-addons_dir = pathlib.Path(r'''{}''')
+addons_dir = pathlib.Path(r'''{0}''')
 if not addons_dir.exists():
     raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
 sys.path.insert(0, str(addons_dir))
 
-try:
-    addon_utils.enable('EnfusionBlenderTools', default_set=False, persistent=False)
-    debug['addon_enabled'] = True
-except Exception:
-    debug['addon_enabled'] = False
+stage('Load EBT modules')
 
 try:
     import EnfusionBlenderTools
@@ -2638,6 +2664,8 @@ try:
 except Exception as e:
     debug['ebt_imported'] = False
     errors.append('import EnfusionBlenderTools failed: ' + str(e))
+
+stage('Register ModelQA')
 
 try:
     import EnfusionBlenderTools.modelqa as modelqa
@@ -2665,8 +2693,50 @@ except Exception as e:
     errors.append('import Workbench/fbx_io failed: ' + str(e))
     raise
 
-Workbench.init(client_id='OwlTools', port={})
-fbx = pathlib.Path(r'''{}''')
+stage('Register material schemas')
+try:
+    from EnfusionBlenderTools.core.materials.accessors import schemas as mat_schemas
+    mat_schemas.register()
+    debug['material_schemas_registered'] = True
+except Exception as e:
+    debug['material_schemas_registered'] = False
+    errors.append('material schemas register failed: ' + str(e))
+
+stage('Check Workbench status')
+try:
+    Workbench.init(client_id='OwlTools', port={1})
+    st = Workbench.get_status()
+    if not st:
+        errors.append('Workbench not ready: ' + str(st))
+        payload = dict(fbx=str(pathlib.Path(r'''{2}''')), count=0, items=[], debug=debug, errors=errors)
+        print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+        try:
+            bpy.ops.wm.quit_blender()
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
+except Exception as e:
+    errors.append('Workbench.init/status failed: ' + str(e))
+    payload = dict(fbx=str(pathlib.Path(r'''{2}''')), count=0, items=[], debug=debug, errors=errors)
+    print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+    try:
+        bpy.ops.wm.quit_blender()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
+fbx = pathlib.Path(r'''{2}''')
+
+stage('Import FBX')
 fbx_io.import_fbx(fbx)
 
 op_exists = False
@@ -2679,7 +2749,8 @@ debug['mqa_operator_exists'] = op_exists
 
 if op_exists:
     try:
-        bpy.ops.ebt.mqa_report_conventions(asset_type=r'''{}''')
+        stage('Run MQA operator')
+        bpy.ops.ebt.mqa_report_conventions(asset_type=r'''{3}''')
         debug['mqa_operator_ran'] = True
     except Exception as e:
         debug['mqa_operator_ran'] = False
@@ -2712,13 +2783,38 @@ except Exception as e:
     errors.append('collect messages failed: ' + str(e))
 
 payload = dict(fbx=str(fbx), count=len(items), items=items, debug=debug, errors=errors)
-print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
+print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+try:
+    bpy.ops.wm.quit_blender()
+except Exception:
+    pass
+try:
+    sys.stdout.flush()
+    sys.stderr.flush()
+except Exception:
+    pass
+os._exit(0)
 "#,
         addons_dir.to_string_lossy(),
         wb_port,
-        fbx_abs.to_string_lossy()
-        , asset_type_norm
+        fbx_abs.to_string_lossy(),
+        asset_type_norm
     );
+
+    fn write_temp_blender_script(prefix: &str, contents: &str) -> Result<PathBuf, String> {
+        let mut p = std::env::temp_dir();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let pid = std::process::id();
+        p.push(format!("{}_{}_{}.py", prefix, pid, ts));
+        fs::write(&p, contents).map_err(|e| format!("Failed to write temp script: {}", e))?;
+        Ok(p)
+    }
+
+    let script_path = write_temp_blender_script("owltools_mqa", &py)?;
+    let script_path_str = script_path.to_string_lossy().to_string();
 
     let tail_lines = |s: &str, max_lines: usize| -> String {
         let lines: Vec<&str> = s.lines().collect();
@@ -2741,15 +2837,108 @@ print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
         None
     };
 
-    let run_blender = |args: &[&str]| -> Result<std::process::Output, String> {
-        std::process::Command::new(&blender)
-            .args(args)
-            .output()
-            .map_err(|e| format!("Failed to run Blender: {}", e))
-    };
+    async fn run_blender(
+        app: &tauri::AppHandle,
+        blender: &Path,
+        args: &[&str],
+        idle_timeout_secs: u64,
+    ) -> Result<std::process::Output, String> {
+        let mut cmd = TokioCommand::new(blender);
+        cmd.args(args);
+        cmd.env("EBT_TEST", "1");
+        cmd.kill_on_drop(true);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let _ = app.emit("mqa_stage", "Launching Blender".to_string());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to run Blender: {}", e))?;
+        let _ = app.emit("mqa_stage", "Blender spawned".to_string());
+        let stdout = child.stdout.take().ok_or_else(|| "Failed to capture Blender stdout".to_string())?;
+        let stderr = child.stderr.take().ok_or_else(|| "Failed to capture Blender stderr".to_string())?;
+
+        let mut out_buf: Vec<u8> = Vec::new();
+        let mut err_buf: Vec<u8> = Vec::new();
+
+        let mut last_stage: String = String::new();
+        let mut idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+
+        let mut out_reader = BufReader::new(stdout).lines();
+        let mut err_reader = BufReader::new(stderr).lines();
+
+        loop {
+            tokio::select! {
+                line = out_reader.next_line() => {
+                    match line {
+                        Ok(Some(l)) => {
+                            idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+                            out_buf.extend_from_slice(l.as_bytes());
+                            out_buf.push(b'\n');
+                            if let Some(stage) = l.trim().strip_prefix("OWLTOOLS_STAGE=") {
+                                last_stage = stage.trim().to_string();
+                                let _ = app.emit("mqa_stage", last_stage.clone());
+                            }
+                        }
+                        Ok(None) => { /* stdout closed */ }
+                        Err(_) => { /* ignore */ }
+                    }
+                }
+                line = err_reader.next_line() => {
+                    match line {
+                        Ok(Some(l)) => {
+                            idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+                            err_buf.extend_from_slice(l.as_bytes());
+                            err_buf.push(b'\n');
+                        }
+                        Ok(None) => { /* stderr closed */ }
+                        Err(_) => { /* ignore */ }
+                    }
+                }
+                status = child.wait() => {
+                    let status = status.map_err(|e| format!("Failed to wait Blender: {}", e))?;
+                    return Ok(std::process::Output { status, stdout: out_buf, stderr: err_buf });
+                }
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let stage_suffix = if last_stage.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" (last stage: {})", last_stage)
+                    };
+                    return Err(format!("Blender stalled (no output for {}s){}", idle_timeout_secs, stage_suffix));
+                }
+            }
+        }
+    }
+
+    async fn run_blender_with_timeout(
+        app: &tauri::AppHandle,
+        blender: &Path,
+        args: &[&str],
+        timeout_secs: u64,
+        idle_timeout_secs: u64,
+    ) -> Result<std::process::Output, String> {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            run_blender(app, blender, args, idle_timeout_secs),
+        )
+            .await
+            .map_err(|_| format!("Blender timed out after {}s", timeout_secs))?
+    }
+
+    // Single file should be fast; keep total timeout low but allow long-ish idle during import.
+    let total_timeout_secs: u64 = 60;
+    let idle_timeout_secs: u64 = 60 * 10;
 
     // First attempt: background mode (preferred), but EBT may require GPU API which Blender disables in background.
-    let mut out = run_blender(&["--background", "--factory-startup", "--python-expr", &py])?;
+    let mut out = run_blender_with_timeout(
+        &app,
+        &blender,
+        &["--background", "--factory-startup", "--python", &script_path_str],
+        total_timeout_secs,
+        idle_timeout_secs,
+    )
+    .await?;
 
     let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -2760,7 +2949,14 @@ print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
             || stdout.contains("GPU functions for drawing are not available in background mode"))
     {
         // Retry without --background so GPU-dependent parts can run.
-        out = run_blender(&["--factory-startup", "--python-expr", &py])?;
+        out = run_blender_with_timeout(
+            &app,
+            &blender,
+            &["--factory-startup", "--python", &script_path_str],
+            total_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
         stdout = String::from_utf8_lossy(&out.stdout).to_string();
         stderr = String::from_utf8_lossy(&out.stderr).to_string();
         json_line = find_json_line(&stdout);
@@ -2797,56 +2993,532 @@ print('OWLTOOLS_MQA_JSON=' + json.dumps(payload, ensure_ascii=False))
     serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
 }
 
- #[tauri::command]
- fn open_fbx_in_blender(xob_path: String, workbench_port: Option<u16>) -> Result<(), String> {
-     let xob_abs = PathBuf::from(&xob_path);
-     if !xob_abs.is_file() {
-         return Err("Invalid xob path".into());
-     }
-     let fbx_abs = xob_abs.with_extension("fbx");
-     if !fbx_abs.is_file() {
-         return Err(format!(
-             "FBX not found next to xob: {}",
-             fbx_abs.to_string_lossy()
-         ));
-     }
+#[tauri::command]
+async fn mqa_report_from_xobs_batch(
+    app: tauri::AppHandle,
+    xob_paths: Vec<String>,
+    workbench_port: Option<u16>,
+    asset_type: Option<String>,
+) -> Result<JsonValue, String> {
+    if xob_paths.is_empty() {
+        return Err("No xob paths".into());
+    }
 
-     let settings = load_settings();
-     let blender = settings
-         .blender_path
-         .as_deref()
-         .map(PathBuf::from)
-         .filter(|p| p.is_file())
-         .or_else(resolve_blender_path)
-         .ok_or_else(|| "Blender not configured".to_string())?;
+    let mut abs_xobs: Vec<PathBuf> = Vec::new();
+    for p in &xob_paths {
+        let pb = PathBuf::from(p);
+        if !pb.is_file() {
+            return Err(format!("Invalid xob path: {}", p));
+        }
+        if pb.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("xob")) != Some(true) {
+            return Err(format!("Not a .xob file: {}", p));
+        }
+        let fbx = pb.with_extension("fbx");
+        if !fbx.is_file() {
+            return Err(format!("FBX not found next to xob: {}", fbx.to_string_lossy()));
+        }
+        abs_xobs.push(pb);
+    }
 
-     let addons_dir = settings
-         .ebt_addons_dir
-         .as_deref()
-         .map(PathBuf::from)
-         .filter(|p| p.is_dir())
-         .ok_or_else(|| "EBT addons directory not configured".to_string())?;
+    let settings = load_settings();
+    let blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path)
+        .ok_or_else(|| "Blender not configured".to_string())?;
 
-     let wb_port: u16 = workbench_port.unwrap_or(5700);
+    let addons_dir = settings
+        .ebt_addons_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| "EBT addons directory not configured".to_string())?;
 
-     let py = format!(
-         r#"import sys, pathlib
+    let wb_port: u16 = workbench_port.unwrap_or(5700);
+
+    let asset_type_norm = asset_type
+        .unwrap_or_else(|| "GENERIC".to_string())
+        .trim()
+        .to_uppercase();
+    let asset_type_norm = match asset_type_norm.as_str() {
+        "GENERIC" | "BUILDINGS" | "VEHICLES" | "WEAPONS" => asset_type_norm,
+        _ => "GENERIC".to_string(),
+    };
+
+    let xob_list_json = serde_json::to_string(
+        &abs_xobs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<String>>(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let py = format!(
+        r#"import sys, pathlib, json, socket, os
 import bpy
-import addon_utils
+from bpy.props import StringProperty, EnumProperty
+
+try:
+    if not hasattr(bpy.types.Material, 'ebt_enfusion_shader_type'):
+        bpy.types.Material.ebt_enfusion_shader_type = StringProperty()
+    if not hasattr(bpy.types.Material, 'ebt_resource_name'):
+        bpy.types.Material.ebt_resource_name = StringProperty(name='Resource Name', default='', description='Resource name for the material, used for exporting to .xob')
+    if not hasattr(bpy.types.Image, 'ebt_resource_name'):
+        bpy.types.Image.ebt_resource_name = StringProperty(name='Resource Name', default='', description='Resource name for the texture, used for exporting to .xob')
+    if not hasattr(bpy.types.Material, 'Cull'):
+        bpy.types.Material.Cull = EnumProperty(items=[('ccw','ccw','',0), ('none','none','',1)], default='ccw')
+except Exception:
+    pass
+
+socket.setdefaulttimeout(3.0)
+
+def stage(msg):
+    try:
+        print('OWLTOOLS_STAGE=' + str(msg), flush=True)
+    except Exception:
+        pass
+
+debug = {{}}
+errors = []
+
+addons_dir = pathlib.Path(r'''{0}''')
+if not addons_dir.exists():
+    raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
+sys.path.insert(0, str(addons_dir))
+
+stage('Load EBT modules')
+
+try:
+    import EnfusionBlenderTools
+    debug['ebt_imported'] = True
+except Exception as e:
+    debug['ebt_imported'] = False
+    errors.append('import EnfusionBlenderTools failed: ' + str(e))
+
+stage('Register ModelQA')
+try:
+    import EnfusionBlenderTools.modelqa as modelqa
+    try:
+        modelqa.register()
+        debug['modelqa_registered'] = True
+    except Exception as e:
+        msg = str(e)
+        if 'already registered' in msg or 'already registered as a subclass' in msg:
+            debug['modelqa_registered'] = True
+            debug['modelqa_register_already'] = True
+        else:
+            debug['modelqa_registered'] = False
+            errors.append('modelqa.register failed: ' + msg)
+except Exception as e:
+    debug['modelqa_registered'] = False
+    errors.append('import modelqa failed: ' + str(e))
+
+try:
+    from EnfusionBlenderTools.workbench import Workbench
+    from EnfusionBlenderTools.core.fbx import fbx_io
+except Exception as e:
+    errors.append('import Workbench/fbx_io failed: ' + str(e))
+    raise
+
+stage('Register material schemas')
+try:
+    from EnfusionBlenderTools.core.materials.accessors import schemas as mat_schemas
+    mat_schemas.register()
+    debug['material_schemas_registered'] = True
+except Exception as e:
+    debug['material_schemas_registered'] = False
+    errors.append('material schemas register failed: ' + str(e))
+
+stage('Check Workbench status')
+try:
+    Workbench.init(client_id='OwlTools', port={1})
+    st = Workbench.get_status()
+    if not st:
+        errors.append('Workbench not ready: ' + str(st))
+        payload = dict(reports=[], debug=debug, errors=errors)
+        print('OWLTOOLS_MQA_BATCH_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+        try:
+            bpy.ops.wm.quit_blender()
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
+except Exception as e:
+    errors.append('Workbench.init/status failed: ' + str(e))
+    payload = dict(reports=[], debug=debug, errors=errors)
+    print('OWLTOOLS_MQA_BATCH_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+    try:
+        bpy.ops.wm.quit_blender()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
+xobs = json.loads(r'''{2}''')
+reports = []
+
+def _remove_orphans_from(collection):
+    # Remove datablocks with no users; repeat until stable.
+    changed = True
+    while changed:
+        changed = False
+        for datablock in list(collection):
+            try:
+                if getattr(datablock, 'users', 0) == 0:
+                    collection.remove(datablock)
+                    changed = True
+            except Exception:
+                pass
+
+def reset_scene(deep=False):
+    # Avoid bpy.ops.wm.read_factory_settings in headless/non-UI contexts (can crash).
+    try:
+        for obj in list(bpy.data.objects):
+            try:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception:
+                pass
+        for col in list(bpy.data.collections):
+            try:
+                bpy.data.collections.remove(col)
+            except Exception:
+                pass
+
+        if deep:
+            try:
+                _remove_orphans_from(bpy.data.meshes)
+                _remove_orphans_from(bpy.data.materials)
+                _remove_orphans_from(bpy.data.images)
+                _remove_orphans_from(bpy.data.node_groups)
+                _remove_orphans_from(bpy.data.textures)
+                _remove_orphans_from(bpy.data.actions)
+                _remove_orphans_from(bpy.data.armatures)
+                _remove_orphans_from(bpy.data.curves)
+                _remove_orphans_from(bpy.data.lights)
+                _remove_orphans_from(bpy.data.cameras)
+            except Exception:
+                pass
+
+            # Blender 4.x has bpy.data.orphans_purge which doesn't require UI context.
+            try:
+                if hasattr(bpy.data, 'orphans_purge'):
+                    bpy.data.orphans_purge(do_recursive=True)
+            except Exception:
+                pass
+
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+for idx, xobp in enumerate(xobs):
+    xob = pathlib.Path(xobp)
+    fbx = xob.with_suffix('.fbx')
+    name = xob.name
+    stage('File {{}}/{{}}: {{}} | Import FBX'.format(idx+1, len(xobs), name))
+    file_errors = []
+    try:
+        reset_scene(deep=((idx % 10) == 0))
+        fbx_io.import_fbx(fbx)
+    except Exception as e:
+        file_errors.append('import_fbx failed: ' + str(e))
+
+    stage('File {{}}/{{}}: {{}} | Run MQA'.format(idx+1, len(xobs), name))
+    if not file_errors:
+        try:
+            if hasattr(bpy.ops, 'ebt') and ('mqa_report_conventions' in dir(bpy.ops.ebt)):
+                bpy.ops.ebt.mqa_report_conventions(asset_type=r'''{3}''')
+            else:
+                file_errors.append('mqa_report_conventions operator not found')
+        except Exception as e:
+            file_errors.append('mqa_report_conventions failed: ' + str(e))
+
+    items = []
+    try:
+        scene = bpy.context.scene
+        if hasattr(scene, 'ebt_report_messages'):
+            msgs = scene.ebt_report_messages
+            for m in msgs:
+                objs = []
+                try:
+                    for o in m.objs:
+                        objs.append(getattr(o, 'name', ''))
+                except Exception:
+                    pass
+                items.append(dict(
+                    category=getattr(m, 'category', ''),
+                    message=getattr(m, 'message', ''),
+                    count=len(objs),
+                    objects=objs,
+                ))
+        else:
+            file_errors.append('scene.ebt_report_messages not found')
+    except Exception as e:
+        file_errors.append('collect messages failed: ' + str(e))
+
+    reports.append(dict(xob=str(xob), fbx=str(fbx), count=len(items), items=items, errors=file_errors))
+
+payload = dict(reports=reports, debug=debug, errors=errors)
+print('OWLTOOLS_MQA_BATCH_JSON=' + json.dumps(payload, ensure_ascii=False), flush=True)
+try:
+    bpy.ops.wm.quit_blender()
+except Exception:
+    pass
+try:
+    sys.stdout.flush()
+    sys.stderr.flush()
+except Exception:
+    pass
+os._exit(0)
+"#,
+        addons_dir.to_string_lossy(),
+        wb_port,
+        xob_list_json,
+        asset_type_norm
+    );
+
+    fn write_temp_blender_script(prefix: &str, contents: &str) -> Result<PathBuf, String> {
+        let mut p = std::env::temp_dir();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let pid = std::process::id();
+        p.push(format!("{}_{}_{}.py", prefix, pid, ts));
+        fs::write(&p, contents).map_err(|e| format!("Failed to write temp script: {}", e))?;
+        Ok(p)
+    }
+
+    let script_path = write_temp_blender_script("owltools_mqa_batch", &py)?;
+    let script_path_str = script_path.to_string_lossy().to_string();
+
+    let tail_lines = |s: &str, max_lines: usize| -> String {
+        let lines: Vec<&str> = s.lines().collect();
+        if lines.len() <= max_lines {
+            return s.trim().to_string();
+        }
+        lines[lines.len().saturating_sub(max_lines)..]
+            .join("\n")
+            .trim()
+            .to_string()
+    };
+
+    let find_batch_json_line = |stdout: &str| -> Option<String> {
+        for line in stdout.lines().rev() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("OWLTOOLS_MQA_BATCH_JSON=") {
+                return Some(rest.to_string());
+            }
+        }
+        None
+    };
+
+    async fn run_blender(
+        app: &tauri::AppHandle,
+        blender: &Path,
+        args: &[&str],
+        idle_timeout_secs: u64,
+    ) -> Result<std::process::Output, String> {
+        let mut cmd = TokioCommand::new(blender);
+        cmd.args(args);
+        cmd.env("EBT_TEST", "1");
+        cmd.kill_on_drop(true);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let _ = app.emit("mqa_stage", "Launching Blender".to_string());
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to run Blender: {}", e))?;
+        let _ = app.emit("mqa_stage", "Blender spawned".to_string());
+        let stdout = child.stdout.take().ok_or_else(|| "Failed to capture Blender stdout".to_string())?;
+        let stderr = child.stderr.take().ok_or_else(|| "Failed to capture Blender stderr".to_string())?;
+
+        let mut out_buf: Vec<u8> = Vec::new();
+        let mut err_buf: Vec<u8> = Vec::new();
+
+        let mut last_stage: String = String::new();
+        let mut idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+
+        let mut out_reader = BufReader::new(stdout).lines();
+        let mut err_reader = BufReader::new(stderr).lines();
+
+        loop {
+            tokio::select! {
+                line = out_reader.next_line() => {
+                    match line {
+                        Ok(Some(l)) => {
+                            idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+                            out_buf.extend_from_slice(l.as_bytes());
+                            out_buf.push(b'\n');
+                            if let Some(stage) = l.trim().strip_prefix("OWLTOOLS_STAGE=") {
+                                last_stage = stage.trim().to_string();
+                                let _ = app.emit("mqa_stage", last_stage.clone());
+                            }
+                        }
+                        Ok(None) => { /* stdout closed */ }
+                        Err(_) => { /* ignore */ }
+                    }
+                }
+                line = err_reader.next_line() => {
+                    match line {
+                        Ok(Some(l)) => {
+                            idle_deadline = tokio::time::Instant::now() + Duration::from_secs(idle_timeout_secs);
+                            err_buf.extend_from_slice(l.as_bytes());
+                            err_buf.push(b'\n');
+                        }
+                        Ok(None) => { /* stderr closed */ }
+                        Err(_) => { /* ignore */ }
+                    }
+                }
+                status = child.wait() => {
+                    let status = status.map_err(|e| format!("Failed to wait Blender: {}", e))?;
+                    return Ok(std::process::Output { status, stdout: out_buf, stderr: err_buf });
+                }
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let stage_suffix = if last_stage.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" (last stage: {})", last_stage)
+                    };
+                    return Err(format!("Blender stalled (no output for {}s){}", idle_timeout_secs, stage_suffix));
+                }
+            }
+        }
+    }
+
+    async fn run_blender_with_timeout(
+        app: &tauri::AppHandle,
+        blender: &Path,
+        args: &[&str],
+        timeout_secs: u64,
+        idle_timeout_secs: u64,
+    ) -> Result<std::process::Output, String> {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            run_blender(app, blender, args, idle_timeout_secs),
+        )
+            .await
+            .map_err(|_| format!("Blender timed out after {}s", timeout_secs))?
+    }
+
+    // Batch can be long-running; scale timeout with number of files.
+    let total_timeout_secs: u64 = 60 * (10 + 5 * (abs_xobs.len() as u64));
+    // No output while importing can be normal; keep this relatively high to avoid false positives.
+    let idle_timeout_secs: u64 = 60 * 15;
+
+    // First attempt: background mode (preferred), but EBT may require GPU API which Blender disables in background.
+    let mut out = run_blender_with_timeout(
+        &app,
+        &blender,
+        &["--background", "--factory-startup", "--python", &script_path_str],
+        total_timeout_secs,
+        idle_timeout_secs,
+    )
+    .await?;
+
+    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    if stderr.contains("GPU functions for drawing are not available in background mode")
+        || stdout.contains("GPU functions for drawing are not available in background mode")
+    {
+        let _ = app.emit("mqa_stage", "Retrying without --background (GPU required)".to_string());
+        out = run_blender_with_timeout(
+            &app,
+            &blender,
+            &["--factory-startup", "--python", &script_path_str],
+            total_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
+        stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    }
+
+    let json_line = find_batch_json_line(&stdout).ok_or_else(|| {
+        let status = out
+            .status
+            .code()
+            .map(|c| format!("exit code {}", c))
+            .unwrap_or_else(|| "terminated".to_string());
+        let stderr_tail = tail_lines(&stderr, 80);
+        let stdout_tail = tail_lines(&stdout, 80);
+        if stderr_tail.is_empty() && stdout_tail.is_empty() {
+            format!("Failed to capture MQA batch report from Blender ({})", status)
+        } else if stderr_tail.is_empty() {
+            format!(
+                "Failed to capture MQA batch report from Blender ({})\n--- stdout (tail) ---\n{}",
+                status, stdout_tail
+            )
+        } else if stdout_tail.is_empty() {
+            format!(
+                "Failed to capture MQA batch report from Blender ({})\n--- stderr (tail) ---\n{}",
+                status, stderr_tail
+            )
+        } else {
+            format!(
+                "Failed to capture MQA batch report from Blender ({})\n--- stderr (tail) ---\n{}\n--- stdout (tail) ---\n{}",
+                status, stderr_tail, stdout_tail
+            )
+        }
+    })?;
+
+    serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_fbx_in_blender(xob_path: String, workbench_port: Option<u16>) -> Result<(), String> {
+    let xob_abs = PathBuf::from(&xob_path);
+    if !xob_abs.is_file() {
+        return Err("Invalid xob path".into());
+    }
+    let fbx_abs = xob_abs.with_extension("fbx");
+    if !fbx_abs.is_file() {
+        return Err(format!(
+            "FBX not found next to xob: {}",
+            fbx_abs.to_string_lossy()
+        ));
+    }
+
+    let settings = load_settings();
+    let blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path)
+        .ok_or_else(|| "Blender not configured".to_string())?;
+
+    let addons_dir = settings
+        .ebt_addons_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| "EBT addons directory not configured".to_string())?;
+
+    let wb_port: u16 = workbench_port.unwrap_or(5700);
+
+    let py = format!(
+        r#"import sys, pathlib
+import bpy
 
 addons_dir = pathlib.Path(r'''{}''')
 if not addons_dir.exists():
     raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
 sys.path.insert(0, str(addons_dir))
-
-try:
-    addon_utils.enable('EnfusionBlenderTools', default_set=True, persistent=True)
-    try:
-        bpy.ops.wm.save_userpref()
-    except Exception:
-        pass
-except Exception:
-    pass
 
 try:
     from EnfusionBlenderTools.workbench import Workbench
@@ -2871,8 +3543,24 @@ except Exception:
          fbx_abs.to_string_lossy()
      );
 
+     fn write_temp_blender_script(prefix: &str, contents: &str) -> Result<PathBuf, String> {
+         let mut p = std::env::temp_dir();
+         let ts = std::time::SystemTime::now()
+             .duration_since(std::time::UNIX_EPOCH)
+             .map_err(|e| e.to_string())?
+             .as_millis();
+         let pid = std::process::id();
+         p.push(format!("{}_{}_{}.py", prefix, pid, ts));
+         fs::write(&p, contents).map_err(|e| format!("Failed to write temp script: {}", e))?;
+         Ok(p)
+     }
+
+     let script_path = write_temp_blender_script("owltools_open_fbx", &py)?;
+     let script_path_str = script_path.to_string_lossy().to_string();
+
      std::process::Command::new(blender)
-         .args(["--factory-startup", "--python-expr", &py])
+         .env("EBT_TEST", "1")
+         .args(["--factory-startup", "--python", &script_path_str])
          .spawn()
          .map_err(|e| format!("Failed to launch Blender: {}", e))?;
      Ok(())
@@ -3942,6 +4630,7 @@ pub fn run() {
             remember_ebt_addons_dir,
             open_fbx_in_blender,
             mqa_report_from_xob,
+            mqa_report_from_xobs_batch,
             create_new_et_from_xob,
             suggest_prefab_folders_from_xob,
             create_new_et_with_meta_from_xob,

@@ -15,6 +15,7 @@
   let unlistenWorkbenchPath: (() => void) | null = null;
   let unlistenFileDrop: (() => void) | null = null;
   let unlistenWebviewDrop: (() => void) | null = null;
+  let unlistenMqaStage: (() => void) | null = null;
 
   type ValidationTab = 'file' | 'config';
   let activeTab: ValidationTab = 'file';
@@ -343,10 +344,31 @@
       }
 
       mqaBatchResults = [];
-      for (let i = 0; i < xobs.length; i++) {
-        const xobPath = xobs[i];
+      if (xobs.length >= 2) {
+        const res = await invoke<any>('mqa_report_from_xobs_batch', {
+          xobPaths: xobs,
+          workbenchPort,
+          assetType: mqaAssetType
+        });
+        const reports = Array.isArray(res?.reports) ? res.reports : [];
+        const byXob = new Map<string, any>();
+        for (const r of reports) {
+          const xp = String(r?.xob ?? '').trim();
+          if (xp) byXob.set(xp, r);
+        }
+        for (const xobPath of xobs) {
+          const r = byXob.get(xobPath);
+          const report = r
+            ? { fbx: r?.fbx, count: r?.count, items: r?.items, errors: r?.errors, debug: res?.debug }
+            : { items: [], errors: ['No report returned'], debug: res?.debug };
+          const errs = Array.isArray(r?.errors) ? r.errors : [];
+          const ok = !errs.length;
+          mqaBatchResults.push({ xobPath, report, ok, error: ok ? undefined : String(errs[0] ?? 'Failed') });
+        }
+      } else {
+        const xobPath = xobs[0];
         const name = xobPath.split(/[\\/]/).pop() ?? xobPath;
-        mqaLoadingStatus = `Running MQA (${i + 1}/${xobs.length}): ${name}`;
+        mqaLoadingStatus = `Running MQA (1/1): ${name}`;
         try {
           const res = await invoke<any>('mqa_report_from_xob', {
             xobPath,
@@ -767,6 +789,17 @@
       });
     } catch {}
 
+    listen<string>('mqa_stage', (e) => {
+      try {
+        const msg = String((e as any)?.payload ?? '').trim();
+        if (msg) {
+          mqaLoadingStatus = msg;
+        }
+      } catch {}
+    }).then((u) => {
+      unlistenMqaStage = u;
+    });
+
     loadAutosocketSettings();
   });
 
@@ -786,6 +819,8 @@
     unlistenFileDrop = null;
     unlistenWebviewDrop?.();
     unlistenWebviewDrop = null;
+    unlistenMqaStage?.();
+    unlistenMqaStage = null;
   });
 
   $: if (isValidateLocked && activeTab !== 'config') {
