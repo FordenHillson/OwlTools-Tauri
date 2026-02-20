@@ -40,6 +40,215 @@ struct ScanLogPayload {
     total: Option<usize>,
 }
 
+fn extract_ucx_offsets_bulk_with_blender(
+    app: &tauri::AppHandle,
+    pairs: &Vec<(String, PathBuf)>,
+) -> std::collections::HashMap<String, (f32, f32, f32)> {
+    let mut out: std::collections::HashMap<String, (f32, f32, f32)> = std::collections::HashMap::new();
+    if pairs.is_empty() { return out; }
+
+    let settings = load_settings();
+    let blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path);
+    let blender = match blender {
+        Some(p) => p,
+        None => {
+            emit_prefabdst_log(app, "info", "Blender debris offset: blender.exe not configured — skip".to_string(), None, None);
+            return out;
+        }
+    };
+    emit_prefabdst_log(app, "info", format!("Debris offset: bulk running {}", blender.to_string_lossy()), None, None);
+
+    let mut list: Vec<(String, String)> = Vec::new();
+    for (key, pb) in pairs {
+        list.push((key.clone(), pb.to_string_lossy().to_string()));
+    }
+    let list_json = serde_json::to_string(&list).unwrap_or("[]".to_string());
+    let py_template = r#"import bpy, json, ast
+files = json.loads(r'''FBX_LIST_JSON''')
+results = {}
+
+def clear_scene():
+    try:
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+    except Exception:
+        pass
+    for datablock in (bpy.data.meshes, bpy.data.armatures, bpy.data.materials, bpy.data.objects):
+        try:
+            for b in list(datablock):
+                if hasattr(b, 'users') and getattr(b, 'users', 0) == 0:
+                    datablock.remove(b)
+        except Exception:
+            pass
+
+def find_offset():
+    for ob in bpy.data.objects:
+        n=(ob.name or '').lower()
+        if not n.startswith('ucx_d_'):
+            continue
+        v=None
+        try:
+            v=ob.get('ebt_original_transform_matrix')
+        except Exception:
+            v=None
+        if v is None:
+            continue
+        try:
+            if isinstance(v, str):
+                v=ast.literal_eval(v)
+            if isinstance(v, (list, tuple)) and len(v)>=12:
+                x=float(v[3]); y=float(v[7]); z=float(v[11])
+                return (x,z,y)
+        except Exception:
+            pass
+    return None
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+except Exception:
+    pass
+
+for key, path in files:
+    clear_scene()
+    try:
+        bpy.ops.import_scene.fbx(filepath=path, automatic_bone_orientation=True)
+    except Exception:
+        continue
+    loc = find_offset()
+    if loc:
+        results[key] = {'x':loc[0],'y':loc[1],'z':loc[2]}
+
+print(json.dumps(results))
+"#;
+    let py = py_template.replace("FBX_LIST_JSON", &list_json);
+
+    let mut script_path = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    script_path.push(format!("owltools_ucx_offsets_bulk_{}_{}.py", std::process::id(), ts));
+    let _ = fs::write(&script_path, &py);
+    let script_path_str = script_path.to_string_lossy().to_string();
+
+    let outp = std::process::Command::new(&blender)
+        .args(["--background", "--factory-startup", "--python", &script_path_str])
+        .output();
+    match outp {
+        Ok(cmd_out) => {
+            let stdout = String::from_utf8_lossy(&cmd_out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&cmd_out.stderr).to_string();
+            if !stderr.trim().is_empty() {
+                emit_prefabdst_log(app, "warn", format!("Blender debris offset bulk stderr: {}", stderr.trim()), None, None);
+            }
+            let mut json_line: Option<String> = None;
+            for line in stdout.lines().rev() {
+                let t = line.trim();
+                if t.starts_with('{') && t.ends_with('}') {
+                    json_line = Some(t.to_string());
+                    break;
+                }
+            }
+            if let Some(jl) = json_line {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&jl) {
+                    if let Some(obj) = v.as_object() {
+                        for (k, val) in obj.iter() {
+                            if let (Some(x), Some(y), Some(z)) = (
+                                val.get("x").and_then(|n| n.as_f64()),
+                                val.get("y").and_then(|n| n.as_f64()),
+                                val.get("z").and_then(|n| n.as_f64()),
+                            ) {
+                                out.insert(k.to_lowercase(), (x as f32, y as f32, z as f32));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            emit_prefabdst_log(app, "warn", format!("Blender debris offset bulk failed: {}", e), None, None);
+        }
+    }
+    out
+}
+
+#[tauri::command]
+fn get_backend_status() -> Result<JsonValue, String> {
+    let settings = load_settings();
+    let resolved_blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path)
+        .map(|p| p.to_string_lossy().to_string());
+
+    let resolved_python = resolve_python_path().map(|p| p.to_string_lossy().to_string());
+
+    // Try a quick bpy import probe (best-effort; ignore errors)
+    let mut bpy_ok: Option<bool> = None;
+    if let Some(ref py) = resolved_python {
+        let out = std::process::Command::new(py)
+            .arg("-c")
+            .arg("import sys;\ntry:\n import bpy; sys.stdout.write('OK')\nexcept Exception as e:\n sys.stdout.write('ERR')\n")
+            .output();
+        if let Ok(out) = out {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("OK") {
+                bpy_ok = Some(true);
+            } else if s.contains("ERR") {
+                bpy_ok = Some(false);
+            }
+        }
+    }
+
+    let prefer_python = match (&resolved_python, bpy_ok) {
+        (Some(_), Some(true)) => true,
+        _ => false,
+    };
+    Ok(json!({
+        "python_path": resolved_python,
+        "python_bpy_ok": bpy_ok,
+        "blender_path": resolved_blender,
+        "prefer_python": prefer_python,
+    }))
+}
+
+fn resolve_python_path() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("OWLTOOLS_PYTHON_PATH") {
+        let p = PathBuf::from(v);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(exe) = find_in_path("python.exe") {
+        return Some(exe);
+    }
+    if let Some(exe) = find_in_path("python") {
+        return Some(exe);
+    }
+    None
+}
+
+fn python_has_bpy(python: &Path) -> bool {
+    match std::process::Command::new(python)
+        .arg("-c")
+        .arg(
+            "import sys;\ntry:\n import bpy; sys.stdout.write('OK')\nexcept Exception:\n sys.stdout.write('ERR')\n",
+        )
+        .output()
+    {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains("OK"),
+        Err(_) => false,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct MetaEntry { guid: String, path: String }
 
@@ -1664,6 +1873,46 @@ fn build_debris_infos_block(items: &[MetaEntry], indent: &str, debris_mass: f32)
     lines.join("\n")
 }
 
+fn build_debris_infos_block_with_offsets(
+    items: &[MetaEntry],
+    indent: &str,
+    debris_mass: f32,
+    offsets_by_file: Option<&std::collections::HashMap<String, (f32, f32, f32)>>,
+) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mass_s = format_mass(debris_mass);
+    let mut lines: Vec<String> = Vec::new();
+    for e in items {
+        let info_id = gen_guid16();
+        let ap_id = gen_guid16();
+        lines.push(format!("{}SCR_DebrisInfo \"{{{}}}\" {{", indent, info_id));
+        lines.push(format!("{} ModelPrefab \"{{{}}}{}\"", indent, e.guid, e.path));
+
+        // Default offset
+        let mut off_line = format!("{}  Offset 0 0 0", indent);
+        if let Some(map) = offsets_by_file {
+            let key = std::path::Path::new(&e.path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if let Some((ox, oy, oz)) = map.get(&key) {
+                off_line = format!("{}  Offset {} {} {}", indent, ox, oy, oz);
+            }
+        }
+
+        lines.push(format!("{} LocalTransform AttachPoint \"{{{}}}\" {{", indent, ap_id));
+        lines.push(off_line);
+        lines.push(format!("{}  Angles 0.00001 0 0", indent));
+        lines.push(format!("{} }}", indent));
+        lines.push(format!("{} m_fMass {}", indent, mass_s));
+        lines.push(format!("{}}}", indent));
+    }
+    lines.join("\n")
+}
+
 fn build_colliders_line(tags: &[String]) -> String {
     if tags.is_empty() {
         return "\"\"".to_string();
@@ -1799,6 +2048,153 @@ fn build_zone_fractal_from_preset(
     s
 }
 
+fn replace_full_dst_markers_with_offsets(
+    text: &str,
+    scan: &FullDstScanResult,
+    debris_mass: f32,
+    offsets_by_file: &std::collections::HashMap<String, (f32, f32, f32)>,
+) -> String {
+    let mut by_part: HashMap<String, (Vec<MetaEntry>, Vec<String>)> = HashMap::new();
+    for z in &scan.zones {
+        by_part.insert(z.part_id.clone(), (z.debris.clone(), z.colliders.clone()));
+    }
+
+    let re_debris = Regex::new(r"(?m)^(?P<indent>\s*)\{\{DEBRIS_ID-(?P<p>[A-Z])\}\}\s*$").unwrap();
+    let re_cols = Regex::new(r"(?m)^(?P<indent>\s*)\{\{COLLIDERS_ID-(?P<p>[A-Z])\}\}\s*$").unwrap();
+
+    let s = re_debris
+        .replace_all(text, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let pid = caps.name("p").map(|m| m.as_str()).unwrap_or("A");
+            let (debris, _cols) = by_part.get(pid).cloned().unwrap_or_default();
+            let child_indent = format!("{} ", indent);
+            build_debris_infos_block_with_offsets(&debris, &child_indent, debris_mass, Some(offsets_by_file))
+        })
+        .to_string();
+
+    re_cols
+        .replace_all(&s, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let pid = caps.name("p").map(|m| m.as_str()).unwrap_or("A");
+            let (_debris, cols) = by_part.get(pid).cloned().unwrap_or_default();
+            format!("{}{}", indent, build_colliders_line(&cols))
+        })
+        .to_string()
+}
+
+fn extract_ucx_offset_with_blender(app: &tauri::AppHandle, fbx_abs: &Path) -> Option<(f32, f32, f32)> {
+    if !fbx_abs.is_file() {
+        return None;
+    }
+    let settings = load_settings();
+    let blender = settings
+        .blender_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(resolve_blender_path)?;
+
+    emit_prefabdst_log(app, "info", format!("Debris offset: running {}", blender.to_string_lossy()), None, None);
+
+    let py_template = r#"import bpy, json, ast
+fbx=r'''FBX_PATH'''
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+except Exception:
+    pass
+try:
+    bpy.ops.import_scene.fbx(filepath=fbx, automatic_bone_orientation=True)
+except Exception:
+    print("{}")
+    raise
+loc=None
+for ob in bpy.data.objects:
+    n=(ob.name or '').lower()
+    if not n.startswith('ucx_d_'):
+        continue
+    v=None
+    try:
+        v=ob.get('ebt_original_transform_matrix')
+    except Exception:
+        v=None
+    if v is None:
+        continue
+    try:
+        if isinstance(v, str):
+            v=ast.literal_eval(v)
+        if isinstance(v, (list, tuple)) and len(v)>=12:
+            x=float(v[3]); y=float(v[7]); z=float(v[11])
+            loc=(x,z,y)
+            break
+    except Exception:
+        pass
+print(json.dumps({'x':loc[0],'y':loc[1],'z':loc[2]}) if loc else "{}")
+"#;
+    let py = py_template.replace("FBX_PATH", &fbx_abs.to_string_lossy());
+
+    let mut script_path = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    script_path.push(format!("owltools_ucx_offset_{}_{}.py", std::process::id(), ts));
+    let _ = fs::write(&script_path, &py);
+    let script_path_str = script_path.to_string_lossy().to_string();
+
+    let out = std::process::Command::new(blender)
+        .args(["--background", "--factory-startup", "--python", &script_path_str])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    if !stderr.trim().is_empty() {
+        emit_prefabdst_log(app, "warn", format!("Blender debris offset stderr: {}", stderr.trim()), None, None);
+    }
+    let mut json_line: Option<String> = None;
+    for line in stdout.lines().rev() {
+        let t = line.trim();
+        if t.starts_with('{') && t.ends_with('}') {
+            json_line = Some(t.to_string());
+            break;
+        }
+    }
+    let Some(jl) = json_line else { return None; };
+    let v: serde_json::Value = serde_json::from_str(&jl).ok()?;
+    let x = v.get("x")?.as_f64()? as f32;
+    let y = v.get("y")?.as_f64()? as f32;
+    let z = v.get("z")?.as_f64()? as f32;
+    Some((x, y, z))
+}
+
+fn collect_debris_offsets(
+    app: &tauri::AppHandle,
+    base_xob_abs: &Path,
+    scan: &FullDstScanResult,
+) -> std::collections::HashMap<String, (f32, f32, f32)> {
+    let Some(dst_dir) = find_dst_directory(base_xob_abs) else { return std::collections::HashMap::new(); };
+    let mut pairs: Vec<(String, PathBuf)> = Vec::new();
+    for z in &scan.zones {
+        for e in &z.debris {
+            if let Some(fname) = Path::new(&e.path).file_name().and_then(|s| s.to_str()) {
+                let fbx_abs = dst_dir.join(fname).with_extension("fbx");
+                if fbx_abs.is_file() {
+                    pairs.push((fname.to_lowercase(), fbx_abs));
+                }
+            }
+        }
+    }
+    if pairs.is_empty() { return std::collections::HashMap::new(); }
+    let map = extract_ucx_offsets_bulk_with_blender(app, &pairs);
+    emit_prefabdst_log(
+        app,
+        "info",
+        format!("Debris offsets: {} found out of {} FBX", map.len(), pairs.len()),
+        None,
+        None,
+    );
+    map
+}
+
 #[derive(Serialize)]
 struct PrefabDstBuildResult {
     out_paths: Vec<String>,
@@ -1929,7 +2325,8 @@ async fn prefabdst_build(
         if gen_key != "template" {
             if et_text.contains("{{DEBRIS_ID-") || et_text.contains("{{COLLIDERS_ID-") {
                 if let Some(scan) = full_scan.as_ref() {
-                    et_text = replace_full_dst_markers(&et_text, scan, debris_mass);
+                    let offsets = collect_debris_offsets(&app, &xob_abs, scan);
+                    et_text = replace_full_dst_markers_with_offsets(&et_text, scan, debris_mass, &offsets);
                 } else {
                     emit_prefabdst_log(
                         &app,
@@ -2926,43 +3323,60 @@ os._exit(0)
             .map_err(|_| format!("Blender timed out after {}s", timeout_secs))?
     }
 
-    // Single file should be fast; keep total timeout low but allow long-ish idle during import.
     let total_timeout_secs: u64 = 60;
     let idle_timeout_secs: u64 = 60 * 10;
 
-    // First attempt: background mode (preferred), but EBT may require GPU API which Blender disables in background.
-    let mut out = run_blender_with_timeout(
-        &app,
-        &blender,
-        &["--background", "--factory-startup", "--python", &script_path_str],
-        total_timeout_secs,
-        idle_timeout_secs,
-    )
-    .await?;
+    let use_python = resolve_python_path().filter(|p| python_has_bpy(p));
 
-    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    let mut json_line = find_json_line(&stdout);
-    if json_line.is_none()
-        && (stderr.contains("GPU functions for drawing are not available in background mode")
-            || stdout.contains("GPU functions for drawing are not available in background mode"))
-    {
-        // Retry without --background so GPU-dependent parts can run.
-        out = run_blender_with_timeout(
+    let (out, stdout, stderr, json_line) = if let Some(python) = use_python {
+        let out = run_blender_with_timeout(
             &app,
-            &blender,
-            &["--factory-startup", "--python", &script_path_str],
+            &python,
+            &["-u", &script_path_str],
             total_timeout_secs,
             idle_timeout_secs,
         )
         .await?;
-        stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        json_line = find_json_line(&stdout);
-    }
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let json_line = find_json_line(&stdout);
+        (out, stdout, stderr, json_line)
+    } else {
+        let mut out = run_blender_with_timeout(
+            &app,
+            &blender,
+            &["--background", "--factory-startup", "--python", &script_path_str],
+            total_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
 
-    let json_line = json_line.ok_or_else(|| {
+        let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        let mut json_line = find_json_line(&stdout);
+        if json_line.is_none()
+            && (stderr.contains("GPU functions for drawing are not available in background mode")
+                || stdout.contains("GPU functions for drawing are not available in background mode"))
+        {
+            out = run_blender_with_timeout(
+                &app,
+                &blender,
+                &["--factory-startup", "--python", &script_path_str],
+                total_timeout_secs,
+                idle_timeout_secs,
+            )
+            .await?;
+            stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            json_line = find_json_line(&stdout);
+        }
+        (out, stdout, stderr, json_line)
+    };
+
+    let json_line = if let Some(j) = json_line {
+        j
+    } else {
         let status = out
             .status
             .code()
@@ -2971,24 +3385,24 @@ os._exit(0)
         let stderr_tail = tail_lines(&stderr, 80);
         let stdout_tail = tail_lines(&stdout, 80);
         if stderr_tail.is_empty() && stdout_tail.is_empty() {
-            format!("Failed to capture MQA report from Blender ({})", status)
+            return Err(format!("Failed to capture MQA report from Blender ({})", status));
         } else if stderr_tail.is_empty() {
-            format!(
+            return Err(format!(
                 "Failed to capture MQA report from Blender ({})\n--- stdout (tail) ---\n{}",
                 status, stdout_tail
-            )
+            ));
         } else if stdout_tail.is_empty() {
-            format!(
+            return Err(format!(
                 "Failed to capture MQA report from Blender ({})\n--- stderr (tail) ---\n{}",
                 status, stderr_tail
-            )
+            ));
         } else {
-            format!(
+            return Err(format!(
                 "Failed to capture MQA report from Blender ({})\n--- stderr (tail) ---\n{}\n--- stdout (tail) ---\n{}",
                 status, stderr_tail, stdout_tail
-            )
+            ));
         }
-    })?;
+    };
 
     serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
 }
@@ -3419,34 +3833,50 @@ os._exit(0)
     // No output while importing can be normal; keep this relatively high to avoid false positives.
     let idle_timeout_secs: u64 = 60 * 15;
 
-    // First attempt: background mode (preferred), but EBT may require GPU API which Blender disables in background.
-    let mut out = run_blender_with_timeout(
-        &app,
-        &blender,
-        &["--background", "--factory-startup", "--python", &script_path_str],
-        total_timeout_secs,
-        idle_timeout_secs,
-    )
-    .await?;
+    let use_python = resolve_python_path().filter(|p| python_has_bpy(p));
 
-    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    if stderr.contains("GPU functions for drawing are not available in background mode")
-        || stdout.contains("GPU functions for drawing are not available in background mode")
-    {
-        let _ = app.emit("mqa_stage", "Retrying without --background (GPU required)".to_string());
-        out = run_blender_with_timeout(
+    let (out, stdout, stderr) = if let Some(python) = use_python {
+        let out = run_blender_with_timeout(
             &app,
-            &blender,
-            &["--factory-startup", "--python", &script_path_str],
+            &python,
+            &["-u", &script_path_str],
             total_timeout_secs,
             idle_timeout_secs,
         )
         .await?;
-        stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    }
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        (out, stdout, stderr)
+    } else {
+        let mut out = run_blender_with_timeout(
+            &app,
+            &blender,
+            &["--background", "--factory-startup", "--python", &script_path_str],
+            total_timeout_secs,
+            idle_timeout_secs,
+        )
+        .await?;
+
+        let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+        if stderr.contains("GPU functions for drawing are not available in background mode")
+            || stdout.contains("GPU functions for drawing are not available in background mode")
+        {
+            let _ = app.emit("mqa_stage", "Retrying without --background (GPU required)".to_string());
+            out = run_blender_with_timeout(
+                &app,
+                &blender,
+                &["--factory-startup", "--python", &script_path_str],
+                total_timeout_secs,
+                idle_timeout_secs,
+            )
+            .await?;
+            stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        }
+        (out, stdout, stderr)
+    };
 
     let json_line = find_batch_json_line(&stdout).ok_or_else(|| {
         let status = out
@@ -3479,92 +3909,6 @@ os._exit(0)
     serde_json::from_str::<JsonValue>(&json_line).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn open_fbx_in_blender(xob_path: String, workbench_port: Option<u16>) -> Result<(), String> {
-    let xob_abs = PathBuf::from(&xob_path);
-    if !xob_abs.is_file() {
-        return Err("Invalid xob path".into());
-    }
-    let fbx_abs = xob_abs.with_extension("fbx");
-    if !fbx_abs.is_file() {
-        return Err(format!(
-            "FBX not found next to xob: {}",
-            fbx_abs.to_string_lossy()
-        ));
-    }
-
-    let settings = load_settings();
-    let blender = settings
-        .blender_path
-        .as_deref()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .or_else(resolve_blender_path)
-        .ok_or_else(|| "Blender not configured".to_string())?;
-
-    let addons_dir = settings
-        .ebt_addons_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .ok_or_else(|| "EBT addons directory not configured".to_string())?;
-
-    let wb_port: u16 = workbench_port.unwrap_or(5700);
-
-    let py = format!(
-        r#"import sys, pathlib
-import bpy
-
-addons_dir = pathlib.Path(r'''{}''')
-if not addons_dir.exists():
-    raise RuntimeError('EBT addons dir does not exist: ' + str(addons_dir))
-sys.path.insert(0, str(addons_dir))
-
-try:
-    from EnfusionBlenderTools.workbench import Workbench
-    from EnfusionBlenderTools.core.fbx import fbx_io
-except Exception as e:
-    raise RuntimeError('Failed to import EnfusionBlenderTools modules: ' + str(e))
-
-try:
-    Workbench.init(client_id='OwlTools', port={})
-except Exception as e:
-    raise RuntimeError('Workbench.init failed: ' + str(e))
-
-fbx = pathlib.Path(r'''{}''')
-fbx_io.import_fbx(fbx)
-try:
-    bpy.ops.ebt.mqa_report_conventions()
-except Exception:
-    pass
-"#,
-         addons_dir.to_string_lossy(),
-         wb_port,
-         fbx_abs.to_string_lossy()
-     );
-
-     fn write_temp_blender_script(prefix: &str, contents: &str) -> Result<PathBuf, String> {
-         let mut p = std::env::temp_dir();
-         let ts = std::time::SystemTime::now()
-             .duration_since(std::time::UNIX_EPOCH)
-             .map_err(|e| e.to_string())?
-             .as_millis();
-         let pid = std::process::id();
-         p.push(format!("{}_{}_{}.py", prefix, pid, ts));
-         fs::write(&p, contents).map_err(|e| format!("Failed to write temp script: {}", e))?;
-         Ok(p)
-     }
-
-     let script_path = write_temp_blender_script("owltools_open_fbx", &py)?;
-     let script_path_str = script_path.to_string_lossy().to_string();
-
-     std::process::Command::new(blender)
-         .env("EBT_TEST", "1")
-         .args(["--factory-startup", "--python", &script_path_str])
-         .spawn()
-         .map_err(|e| format!("Failed to launch Blender: {}", e))?;
-     Ok(())
- }
 
 fn cached_prefab_status() -> PrefabCacheStatus {
     let path = prefab_index_path();
@@ -4609,6 +4953,7 @@ pub fn run() {
             greet,
             read_text_file,
             write_text_file,
+            get_backend_status,
             wb_call,
             updater_download_msi,
             updater_install_msi,
@@ -4628,7 +4973,6 @@ pub fn run() {
             remember_extra_dirs,
             remember_blender_path,
             remember_ebt_addons_dir,
-            open_fbx_in_blender,
             mqa_report_from_xob,
             mqa_report_from_xobs_batch,
             create_new_et_from_xob,

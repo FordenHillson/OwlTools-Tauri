@@ -43,8 +43,14 @@
   let mqaCopiedKey: string | null = null;
   let mqaCopiedTimer: any = null;
 
+  let backendPythonPath = '';
+  let backendBpyOk: boolean | null = null;
+  let backendBlenderPath = '';
+  let backendPreferPython = false;
+  let backendStatus = '';
+
   let configLoaded = false;
-  $: isConfigReady = !!(blenderPath && ebtAddonsDir);
+  $: isConfigReady = !!(ebtAddonsDir && (backendPreferPython || blenderPath));
   $: isValidateLocked = configLoaded && !isConfigReady;
 
   $: selectedFileNames = selectedFilePaths.map((p) => p.split(/[\\/]/).pop() ?? p);
@@ -476,23 +482,21 @@
     invoke('remember_ebt_addons_dir', { path: null }).catch(() => {});
   }
 
-  async function openFbxInBlender() {
-    configMessage = '';
-    if (!selectedPrimaryPath) {
-      configMessage = 'Please select .xob file first';
-      return;
-    }
-    if (!selectedPrimaryPath.toLowerCase().endsWith('.xob')) {
-      configMessage = 'Selected file must be .xob';
-      return;
-    }
+  async function refreshBackendStatus() {
     try {
-      await invoke('open_fbx_in_blender', { xobPath: selectedPrimaryPath, workbenchPort });
-      configMessage = 'Opening FBX in Blender...';
-    } catch (err: any) {
-      configMessage = String(err?.message || err || 'Failed to open FBX');
+      const s = await invoke<any>('get_backend_status');
+      backendPythonPath = String(s?.python_path ?? '') || '';
+      backendBpyOk = typeof s?.python_bpy_ok === 'boolean' ? Boolean(s.python_bpy_ok) : null;
+      backendBlenderPath = String(s?.blender_path ?? '') || '';
+      backendPreferPython = Boolean(s?.prefer_python);
+      backendStatus = backendPreferPython
+        ? `Python${backendPythonPath ? ` (${backendPythonPath})` : ''}${backendBpyOk === false ? ' [no bpy]' : ''}`
+        : `Blender${backendBlenderPath ? ` (${backendBlenderPath})` : ''}`;
+    } catch (e) {
+      backendStatus = 'Unknown';
     }
   }
+
 
   async function pickSaveLogDirectory() {
     try {
@@ -801,6 +805,7 @@
     });
 
     loadAutosocketSettings();
+    refreshBackendStatus();
   });
 
   $: if ((activeTab as any) === 'results') {
@@ -979,8 +984,12 @@
                 on:change={saveWorkbenchPort}
               />
             </div>
+            <div class="config-title">Backend</div>
+            <div class="config-row">
+              <input class="config-input" readonly value={backendStatus} placeholder="Unknown" />
+              <button class="btn btn-secondary" on:click={refreshBackendStatus}>Refresh</button>
+            </div>
             <div class="config-actions">
-              <button class="btn btn-primary" on:click={openFbxInBlender}>Open FBX in Blender</button>
             </div>
             {#if configMessage}
               <div class="config-message">{configMessage}</div>
